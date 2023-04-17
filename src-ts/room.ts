@@ -163,7 +163,7 @@ export class Room {
           this.state.storage.put('message_history', history)
         }
         for (let sub of this.subscriptions.filter(sub => peers.includes(sub.subscriber_id))) {
-          sub.socket.send(body.data)
+          sub.socket.send(JSON.stringify(body.data))
         }
         this.keepAlive(body.sender_id)
         return true
@@ -185,7 +185,7 @@ export class Room {
         }
         let id = body.receiver_id
         for (let sub of this.subscriptions.filter(sub => id == sub.subscriber_id)) {
-          sub.socket.send(body.data)
+          sub.socket.send(JSON.stringify(body.data))
         }
         this.keepAlive(body.sender_id)
         return true

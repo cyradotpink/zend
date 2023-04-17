@@ -1,7 +1,4 @@
-use crate::{
-    peer_api,
-    websocket_api::{self as api, SignedMethodCall},
-};
+use crate::{peer_api, websocket_api as api};
 use futures::StreamExt;
 use serde;
 use std::{fmt::Display, rc::Rc};
@@ -28,7 +25,7 @@ impl<T, E: Display> ResultExt<T> for Result<T, E> {
     }
 }
 
-trait WebSocketExt {
+pub trait WebSocketExt {
     /** (n)o (f)ail (send) (j)son, given a less-than-readable name as it's
     frequently used in places with already busy syntax  */
     fn nfsendj<T: serde::Serialize>(&self, data: &T);
@@ -51,53 +48,6 @@ impl WebSocketExt for w::WebSocket {
             Ok(data) => self.nfsendj(data),
             Err(err) => console_log!("Failed to unwrap a result. {}", err),
         }
-    }
-}
-
-mod method_handlers {
-    use crate::{
-        room_api::{self, IntoRequest},
-        w, websocket_api as api,
-    };
-    use enum_convert::EnumConvert;
-    use std::rc::Rc;
-
-    #[derive(EnumConvert)]
-    pub enum Error<T: serde::Serialize> {
-        #[enum_convert(from)]
-        WorkerError(w::Error),
-        MethodError(T),
-    }
-    impl<T: serde::Serialize> From<serde_json::Error> for Error<T> {
-        fn from(value: serde_json::Error) -> Self {
-            Self::WorkerError(value.into())
-        }
-    }
-
-    pub async fn create_room(
-        env: Rc<w::Env>,
-        _: api::CreateRoomArgs,
-        common_args: api::MethodCallCommonArgs,
-    ) -> Result<api::CreateRoomReturn, Error<()>> {
-        let request = room_api::InitialiseMessage {
-            initial_peer_id: common_args.ecdsa_public_key,
-        }
-        .into_request()?;
-        let namespace = env.durable_object("ROOM")?;
-        let mut room_id: Option<api::RoomId> = None;
-        while let None = room_id {
-            let tmp_id = api::RoomId::random(w::js_sys::Math::random);
-            let tmp_stub = namespace.id_from_name(&tmp_id.to_string())?.get_stub()?;
-            //                           // not really sure why the request has to be consumed here but w/e
-            let mut response = tmp_stub.fetch_with_request(request.clone()?).await?;
-            let success = serde_json::from_str(&response.text().await?)?;
-            if success {
-                room_id = Some(tmp_id)
-            }
-        }
-        // Reasonable unwrap because the loop condition forces room_id to be Some here
-        let room_id = room_id.unwrap();
-        Ok(api::CreateRoomReturn { room_id })
     }
 }
 
@@ -170,54 +120,37 @@ async fn handle_signed_method_call(
         return Err(());
     }
 
-    /*enum MappedError {
-        SerdeJsonError(serde_json::Error),
-    }*/
-    fn map_json<T: serde::Serialize, U: serde::Serialize>(
-        result: Result<T, method_handlers::Error<U>>,
-    ) -> Result<Result<serde_json::Value, serde_json::Value>, w::Error> {
-        match result {
-            Ok(v) => match serde_json::to_value(v) {
-                Ok(v) => Ok(Ok(v)), // The Method call was Ok and the returned value serialised Ok
-                Err(e) => Err(e.into()), // The method call was Ok but the returned value failed to serialise
-            },
-            Err(e) => match e {
-                h::Error::WorkerError(e) => Err(e), // There was some unexpected error while handling the call
-                h::Error::MethodError(e) => match serde_json::to_value(e) {
-                    Ok(v) => Ok(Err(v)), // The method call intentionally returned an error and the error serialised Ok
-                    Err(e) => Err(e.into()), // The method call intentially returned an error but the error failed to serialise
-                },
-            },
-        }
-    }
-
+    use crate::websocket_api_handlers as h;
     use api::MethodCallArgsVariants as Method;
-    use method_handlers as h;
     let common_args = signed_call.signed_call.call.common_arguments;
     let variant_args = signed_call.signed_call.call.variant_arguments;
     let result = match variant_args {
-        Method::CreateRoom(args) => map_json(h::create_room(env, args, common_args).await),
-        Method::SubscribeToRoom(_) => todo!(),
+        Method::CreateRoom => h::create_room(env, common_args).await,
+        Method::SubscribeToRoom(args) => {
+            h::subscribe_to_room(env, server.clone(), common_args, args).await
+        }
         Method::AddPrivilegedPeer(_) => todo!(),
         Method::GetRoomDataHistory(_) => todo!(),
         Method::DeleteData(_) => todo!(),
         Method::BroadcastData(_) => todo!(),
         Method::UnicastData(_) => todo!(),
     };
-    match result {
-        Ok(serialize_result) => match serialize_result {
-            Ok(value) => server.nfsendj_unwrap(&api::ServerToClientMessage::call_success(
-                signed_call.call_id,
-                value,
-            )),
-            Err(err_value) => server.nfsendj(&api::ServerToClientMessage::call_error(
-                signed_call.call_id,
-                api::ErrorId::InternalError,
-                None,
-            )),
+    let to_send = match result {
+        Ok(result) => api::ServerToClientMessage::from_success(signed_call.call_id, result),
+        Err(err) => match err {
+            h::Error::WorkerError(err) => {
+                console_log!("An internal error occured: {}", err);
+                api::ServerToClientMessage::from_error(
+                    signed_call.call_id,
+                    api::ErrorId::InternalError.with_default_message(),
+                )
+            }
+            h::Error::MethodError(err) => {
+                api::ServerToClientMessage::from_error(signed_call.call_id, err)
+            }
         },
-        Err(err) => console_log!("Internal error. {}", err),
     };
+    server.nfsendj(&to_send);
     Ok(())
 }
 
@@ -258,7 +191,13 @@ pub async fn handle_ws_server(env: w::Env, server: w::WebSocket) {
     let server = Rc::new(server);
     let env = Rc::new(env);
 
-    let mut event_stream = server.events().expect("could not open stream");
+    let mut event_stream = match server.events() {
+        Ok(stream) => stream,
+        Err(err) => {
+            console_log!("Could not open a websocket stream: {}", err);
+            return;
+        }
+    };
 
     while let Some(result) = event_stream.next().await {
         match result {

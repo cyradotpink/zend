@@ -97,7 +97,6 @@ impl Display for SignatureFromBase64Error {
 impl TryFrom<String> for EcdsaSignatureWrapper {
     type Error = SignatureFromBase64Error;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        type Error = SignatureFromBase64Error;
         let bytes = decode_base64(&value)?;
         Ok(Self(Signature::from_slice(&bytes.as_slice())?))
     }
@@ -178,9 +177,6 @@ pub struct MethodCallCommonArgs {
 }
 
 #[derive(Deserialize, Debug)]
-pub struct CreateRoomArgs {}
-
-#[derive(Deserialize, Debug)]
 pub struct SubscribeToRoomArgs {
     pub room_id: RoomId,
 }
@@ -203,16 +199,6 @@ pub struct DeleteDataArgs {
     pub data_sender_key: EcdsaPublicKeyWrapper,
     pub data_nonce: Nonce,
 }
-
-/*
-#[derive(Deserialize, Serialize, Debug)]
-#[serde(tag = "data_type", content = "data")]
-#[serde(rename_all = "snake_case")]
-enum SendDataDataVariants {
-    Plain(serde_json::Value),
-    RoomCipher(serde_json::Value),
-    PeerCipher(serde_json::Value),
-} */
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct SendDataCommonArgs {
@@ -241,7 +227,7 @@ pub struct UnicastDataArgs {
 #[serde(tag = "method_name", content = "method_arguments")]
 #[serde(rename_all = "snake_case")]
 pub enum MethodCallArgsVariants {
-    CreateRoom(CreateRoomArgs),
+    CreateRoom,
     SubscribeToRoom(SubscribeToRoomArgs),
     AddPrivilegedPeer(AddPrivilegedPeerArgs),
     GetRoomDataHistory(GetRoomDataHistoryArgs),
@@ -264,7 +250,7 @@ impl TryFrom<serde_json::Value> for MethodCallContent {
         struct CommonArgsHelper {
             method_arguments: MethodCallCommonArgs,
         }
-        // Cloning here is not ideal but whatever
+        // Cloning here is probably not ideal but whatever
         let common_arguments =
             serde_json::from_value::<CommonArgsHelper>(value.clone())?.method_arguments;
         let variant_arguments: MethodCallArgsVariants = serde_json::from_value(value)?;
@@ -345,17 +331,32 @@ impl From<SignedMethodCallPartial> for SignedMethodCallOrPartial {
     }
 }
 
-#[derive(Serialize, Debug)]
-pub struct CreateRoomReturn {
-    pub room_id: RoomId,
-}
-
 #[derive(Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "message_type", content = "message_content")]
+#[serde(
+    rename_all = "snake_case",
+    tag = "message_type",
+    content = "message_content"
+)]
 pub enum ClientToServerMessage {
     Ping,
     SignedMethodCall(SignedMethodCallOrPartial),
+}
+
+#[derive(Serialize, Debug)]
+pub struct CreateRoomSuccess {
+    pub room_id: RoomId,
+}
+
+#[derive(Serialize, Debug, EnumConvert)]
+#[enum_convert(from)]
+#[serde(untagged)]
+pub enum MethodCallSuccess {
+    // When deserialising, serde should attempt to deserialise to this variant
+    // first and immediately succeed, leaving the client to manually deserialise
+    // into an actual type.
+    Value(serde_json::Value),
+    CreateRoom(CreateRoomSuccess),
+    Ack,
 }
 
 #[derive(Serialize, Debug)]
@@ -365,18 +366,52 @@ pub enum ErrorId {
     InvalidSignature,
     ParseError,
 }
+impl ErrorId {
+    pub fn with_message(self, message: String) -> MethodCallError {
+        MethodCallError {
+            error_id: self,
+            message: Some(message),
+        }
+    }
+    pub fn with_default_message(self) -> MethodCallError {
+        #[allow(unreachable_patterns)]
+        let message = match self {
+            ErrorId::InternalError => "An unexpected internal error occured.",
+            ErrorId::InvalidSignature => "The request was not signed correctly.",
+            ErrorId::ParseError => "The request could not be parsed.",
+            _ => "",
+        };
+        if message.is_empty() {
+            self.with_message(message.to_string())
+        } else {
+            MethodCallError {
+                error_id: self,
+                message: None,
+            }
+        }
+    }
+}
 
 #[derive(Serialize, Debug)]
 pub struct MethodCallError {
     error_id: ErrorId,
     message: Option<String>,
 }
+impl From<ErrorId> for MethodCallError {
+    fn from(error_id: ErrorId) -> Self {
+        error_id.with_default_message()
+    }
+}
 
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "return_type", content = "return_data")]
+#[derive(Serialize, Debug, EnumConvert)]
+#[serde(
+    rename_all = "snake_case",
+    tag = "return_type",
+    content = "return_data"
+)]
+#[enum_convert(from)]
 pub enum MethodCallReturnVariants {
-    Success(serde_json::Value),
+    Success(MethodCallSuccess),
     Error(MethodCallError),
 }
 
@@ -387,9 +422,13 @@ pub struct MethodCallReturn {
     pub return_data: MethodCallReturnVariants,
 }
 
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "message_type", content = "message_content")]
+#[derive(Serialize, Debug, EnumConvert)]
+#[enum_convert(from)]
+#[serde(
+    rename_all = "snake_case",
+    tag = "message_type",
+    content = "message_content"
+)]
 pub enum ServerToClientMessage {
     Pong,
     MethodCallReturn(MethodCallReturn),
@@ -399,16 +438,24 @@ impl ServerToClientMessage {
     pub fn pong() -> Self {
         Self::Pong
     }
-    pub fn call_success<T: Serialize>(call_id: u64, data: T) -> Result<Self, serde_json::Error> {
-        Ok(Self::MethodCallReturn(MethodCallReturn {
-            call_id,
-            return_data: MethodCallReturnVariants::Success(serde_json::to_value(data)?),
-        }))
-    }
     pub fn call_error(call_id: u64, error_id: ErrorId, message: Option<String>) -> Self {
+        MethodCallReturn {
+            call_id,
+            return_data: MethodCallError { error_id, message }.into(),
+        }
+        .into()
+    }
+    pub fn from_error(call_id: u64, error: MethodCallError) -> Self {
+        MethodCallReturn {
+            call_id,
+            return_data: error.into(),
+        }
+        .into()
+    }
+    pub fn from_success(call_id: u64, data: MethodCallSuccess) -> Self {
         Self::MethodCallReturn(MethodCallReturn {
             call_id,
-            return_data: MethodCallReturnVariants::Error(MethodCallError { error_id, message }),
+            return_data: data.into(),
         })
     }
     pub fn info(text: &str) -> Self {

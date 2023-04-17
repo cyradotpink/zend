@@ -1,5 +1,5 @@
 use enum_convert::EnumConvert;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json;
 use worker as w;
 
@@ -56,7 +56,7 @@ pub struct DeleteDataMessage {
 #[serde(rename_all = "snake_case", tag = "message_type")]
 pub enum ToRoomMessage {
     Initialise(InitialiseMessage),
-    CheckExists,
+    // CheckExists,
     Subscribe(SubscribeMessage),
     AddPrivilegedPeer(AddPrivilegedPeerMessage),
     Delete(DeleteMessage),
