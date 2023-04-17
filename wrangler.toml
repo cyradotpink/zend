@@ -1,0 +1,12 @@
+name = "zend-worker"
+compatibility_date = "2023-04-06"
+main = "src-ts/index.ts"
+
+[build]
+command = "worker-build"
+
+[durable_objects]
+bindings = [
+  { name = "ROOM", class_name = "Room"}
+  { name = "PEER", class_name = "Peer"}
+]

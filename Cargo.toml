@@ -1,0 +1,21 @@
+[package]
+name = "zend-worker"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-std = "1"
+base64 = "0"
+enum-convert = { version = "0.1.0", path = "enum-convert" }
+futures = "0"
+getrandom = { version = "0", features = ["js"] }  # need to enable wasm feature flag in dependency tree (p256->randcore->getrandom)
+hex = "0"
+p256 = { version = "0", features = ["ecdsa", "hex-literal", "sha256"] }
+serde = "1"
+serde_json = "1"
+worker = "0"
