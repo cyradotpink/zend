@@ -109,9 +109,6 @@ impl Display for EcdsaSignatureWrapper {
 #[serde(into = "String")]
 pub struct RoomId(pub u64);
 impl RoomId {
-    /*pub fn random(gen: fn() -> f64) -> Self {
-        Self::from_random(gen())
-    }*/
     pub fn from_random(random: f64) -> Self {
         if random >= 1.0 {
             panic!()
@@ -205,12 +202,12 @@ pub struct DeleteDataArgs {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct SendDataCommonArgs {
-    room_id: RoomId,
-    write_history: bool,
-    timestamp: u64,
+    pub room_id: RoomId,
+    pub write_history: bool,
+    pub timestamp: u64,
     // #[serde(flatten)]
     // data: SendDataDataVariants,
-    data: serde_json::Value,
+    pub data: serde_json::Value,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -386,12 +383,12 @@ impl ErrorId {
             _ => "",
         };
         if message.is_empty() {
-            self.with_message(message.to_string())
-        } else {
             MethodCallError {
                 error_id: self,
                 message: None,
             }
+        } else {
+            self.with_message(message.to_string())
         }
     }
 }

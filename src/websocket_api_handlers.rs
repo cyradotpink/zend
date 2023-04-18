@@ -96,34 +96,43 @@ async fn subscriber_background_future(
     };
     ws_client.accept()?;
     let mut event_stream = server.events()?;
-    // TODO refactor for readability
     while let Some(result) = event_stream.next().await {
-        match result {
-            Ok(event) => match event {
-                w::WebsocketEvent::Message(msg) => {
-                    if let Some(text) = msg.text() {
-                        let message = serde_json::from_str::<FromRoomMessage>(&text)?;
-                        match message {
-                            FromRoomMessage::Close => ws_client.close(None, None::<&str>)?,
-                            FromRoomMessage::Data(data_message) => server.nfsendj(
-                                &api::SubscriptionData {
-                                    subscription_id,
-                                    room_id,
-                                    sender_id: data_message.sender_id,
-                                    nonce: data_message.nonce,
-                                    data: data_message.data,
-                                }
-                                .into_message(),
-                            ),
-                        }
-                    }
-                }
-                w::WebsocketEvent::Close(event) => {
-                    console_log!("(Connection to room closed) {:#?}", event)
-                }
-            },
-            Err(err) => console_log!("Error in connection to room: {}", err),
-        }
+        let event = match result {
+            Err(err) => {
+                console_log!("Error in connection to room: {}", err);
+                break;
+            }
+            Ok(event) => event,
+        };
+        let message = match event {
+            w::WebsocketEvent::Close(event) => {
+                console_log!("(Connection to room closed) {:#?}", event);
+                break;
+            }
+            w::WebsocketEvent::Message(message) => message,
+        };
+        let text = match message.text() {
+            None => break,
+            Some(text) => text,
+        };
+        let message = serde_json::from_str::<FromRoomMessage>(&text)?;
+        let data_message = match message {
+            FromRoomMessage::Close => {
+                ws_client.close(None, None::<&str>)?;
+                break;
+            }
+            FromRoomMessage::Data(data_message) => data_message,
+        };
+        server.nfsendj(
+            &api::SubscriptionData {
+                subscription_id,
+                room_id,
+                sender_id: data_message.sender_id,
+                nonce: data_message.nonce,
+                data: data_message.data,
+            }
+            .into_message(),
+        )
     }
     Ok(())
 }
@@ -150,4 +159,55 @@ pub async fn subscribe_to_room(
     });
 
     Ok(api::MethodCallSuccess::Ack)
+}
+
+pub async fn unsubscribe_from_room() -> Result<api::MethodCallSuccess, Error> {
+    todo!();
+}
+
+pub async fn add_privileged_peer(
+    env: &w::Env,
+    common_args: api::MethodCallCommonArgs,
+    args: api::AddPrivilegedPeerArgs,
+) -> Result<api::MethodCallSuccess, Error> {
+    let room_id = args.room_id;
+    let request = room_api::AddPrivilegedPeerMessage {
+        adder_id: common_args.ecdsa_public_key,
+        added_id: args.allow_ecdsa_public_key,
+    }
+    .into_request()?;
+    let stub = get_room_stub(env, room_id)?;
+    // Make sure that the room returns a boolean to determine that it didn't fail in an unexpected way,
+    // but don't care about the actual result to hide info from clients
+    let _ = serde_json::from_str::<bool>(&stub.fetch_with_request(request).await?.text().await?);
+    Ok(api::MethodCallSuccess::Ack)
+}
+
+pub async fn get_room_data_history() -> Result<api::MethodCallSuccess, Error> {
+    todo!();
+}
+pub async fn delete_data() -> Result<api::MethodCallSuccess, Error> {
+    todo!();
+}
+
+pub async fn broadcast_data(
+    env: &w::Env,
+    common_args: api::MethodCallCommonArgs,
+    args: api::BroadcastDataArgs,
+) -> Result<api::MethodCallSuccess, Error> {
+    let args = args.common_args;
+    let request = room_api::BroadcastDataMessage {
+        data: args.data,
+        sender_id: common_args.ecdsa_public_key,
+        nonce: common_args.nonce,
+        write_history: args.write_history,
+    }
+    .into_request()?;
+    let stub = get_room_stub(env, args.room_id)?;
+    let _ = serde_json::from_str::<bool>(&stub.fetch_with_request(request).await?.text().await?);
+    Ok(api::MethodCallSuccess::Ack)
+}
+
+pub async fn unicast_data() -> Result<api::MethodCallSuccess, Error> {
+    todo!();
 }

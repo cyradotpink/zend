@@ -4,26 +4,6 @@ use std::{fmt::Display, rc::Rc};
 use w::console_log;
 use worker as w;
 
-trait ResultExt<T> {
-    fn expect_send(self, server: &w::WebSocket, call_id: u64) -> Result<T, ()>;
-}
-impl<T, E: Display> ResultExt<T> for Result<T, E> {
-    fn expect_send(self, server: &w::WebSocket, call_id: u64) -> Result<T, ()> {
-        match self {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                console_log!("Got error. {}", e);
-                server.nfsendj(&api::ServerToClientMessage::call_error(
-                    call_id,
-                    api::ErrorId::InternalError,
-                    None,
-                ));
-                Err(())
-            }
-        }
-    }
-}
-
 pub trait WebSocketExt {
     /** (n)o (f)ail (send) (j)son, given a less-than-readable name as it's
     frequently used in places with already busy syntax  */
@@ -128,12 +108,14 @@ async fn handle_signed_method_call(
         Method::SubscribeToRoom(args) => {
             h::subscribe_to_room(env, server.clone(), common_args, args, signed_call.call_id).await
         }
-        Method::UnsubscribeFromRoom(_) => todo!(),
-        Method::AddPrivilegedPeer(_) => todo!(),
-        Method::GetRoomDataHistory(_) => todo!(),
-        Method::DeleteData(_) => todo!(),
-        Method::BroadcastData(_) => todo!(),
-        Method::UnicastData(_) => todo!(),
+        Method::UnsubscribeFromRoom(_) => h::unsubscribe_from_room().await,
+        Method::AddPrivilegedPeer(args) => {
+            h::add_privileged_peer(env.as_ref(), common_args, args).await
+        }
+        Method::GetRoomDataHistory(_) => h::get_room_data_history().await,
+        Method::DeleteData(_) => h::delete_data().await,
+        Method::BroadcastData(args) => h::broadcast_data(env.as_ref(), common_args, args).await,
+        Method::UnicastData(_) => h::unicast_data().await,
     };
     let to_send = match result {
         Ok(result) => api::ServerToClientMessage::from_success(signed_call.call_id, result),
@@ -159,14 +141,18 @@ async fn handle_parsed_message(
     message: api::ClientToServerMessage,
     server: Rc<w::WebSocket>,
 ) {
+    console_log!("{:?}", message);
     match message {
         api::ClientToServerMessage::Ping => {
             server.nfsendj(&api::ServerToClientMessage::pong());
         }
         api::ClientToServerMessage::SignedMethodCall(signed_call) => match signed_call {
-            api::SignedMethodCallOrPartial::Partial(call_id) => server.nfsendj(
-                &api::ServerToClientMessage::call_error(call_id, api::ErrorId::ParseError, None),
-            ),
+            api::SignedMethodCallOrPartial::Partial(call_id) => {
+                server.nfsendj(&api::ServerToClientMessage::from_error(
+                    call_id,
+                    api::ErrorId::ParseError.with_default_message(),
+                ))
+            }
             api::SignedMethodCallOrPartial::Full(signed_call) => {
                 let _ = handle_signed_method_call(env, signed_call, server).await;
             }
@@ -175,7 +161,7 @@ async fn handle_parsed_message(
 }
 
 async fn handle_message(env: Rc<w::Env>, text: String, server: Rc<w::WebSocket>) {
-    console_log!("{:?}", text);
+    // console_log!("{:?}", text);
     match serde_json::from_str::<api::ClientToServerMessage>(&text) {
         Ok(message) => handle_parsed_message(env, message, server).await,
         Err(err) => {
@@ -200,28 +186,31 @@ pub async fn handle_ws_server(env: w::Env, server: w::WebSocket) {
     };
 
     while let Some(result) = event_stream.next().await {
-        match result {
-            Ok(event) => match event {
-                w::WebsocketEvent::Message(msg) => {
-                    match msg.text() {
-                        Some(text) => w::wasm_bindgen_futures::spawn_local(handle_message(
-                            env.clone(),
-                            text,
-                            server.clone(),
-                        )),
-                        None => console_log!("no text :("),
-                    }
-                    console_log!("{} - {:#?}", w::Date::now().as_millis(), msg.text())
-                }
-                w::WebsocketEvent::Close(event) => {
-                    console_log!("{} - {:#?}", w::Date::now().as_millis(), event)
-                }
-            },
-            Err(err) => console_log!(
-                "{} - Error in websocket: {}",
-                w::Date::now().as_millis(),
-                err
-            ),
+        let event = match result {
+            Err(err) => {
+                console_log!(
+                    "{} - Error in websocket: {}",
+                    w::Date::now().as_millis(),
+                    err
+                );
+                break;
+            }
+            Ok(event) => event,
+        };
+        let message_event = match event {
+            w::WebsocketEvent::Close(event) => {
+                console_log!("{} - {:#?}", w::Date::now().as_millis(), event);
+                break;
+            }
+            w::WebsocketEvent::Message(message_event) => message_event,
+        };
+        match message_event.text() {
+            None => console_log!("no text :("),
+            Some(text) => w::wasm_bindgen_futures::spawn_local(handle_message(
+                env.clone(),
+                text,
+                server.clone(),
+            )),
         }
     }
     console_log!("closed :)");
