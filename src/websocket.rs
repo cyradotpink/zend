@@ -1,6 +1,5 @@
 use crate::{peer_api, websocket_api as api};
 use futures::StreamExt;
-use serde;
 use std::{fmt::Display, rc::Rc};
 use w::console_log;
 use worker as w;
@@ -127,8 +126,9 @@ async fn handle_signed_method_call(
     let result = match variant_args {
         Method::CreateRoom => h::create_room(env, common_args).await,
         Method::SubscribeToRoom(args) => {
-            h::subscribe_to_room(env, server.clone(), common_args, args).await
+            h::subscribe_to_room(env, server.clone(), common_args, args, signed_call.call_id).await
         }
+        Method::UnsubscribeFromRoom(_) => todo!(),
         Method::AddPrivilegedPeer(_) => todo!(),
         Method::GetRoomDataHistory(_) => todo!(),
         Method::DeleteData(_) => todo!(),

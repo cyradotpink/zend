@@ -67,7 +67,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
             })
             .unwrap()
         }
-        println!("{:?} into, {:?} from", into_override, from_override);
 
         if let Mode::Do = from_override {
             output.extend(quote! {

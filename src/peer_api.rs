@@ -1,8 +1,6 @@
-use serde::Serialize;
-use serde_json;
-use worker as w;
-
 use crate::websocket_api;
+use serde::Serialize;
+use worker as w;
 
 #[derive(Serialize)]
 pub struct CheckNonceMessage {

@@ -1,9 +1,7 @@
+use crate::websocket_api;
 use enum_convert::EnumConvert;
 use serde::Serialize;
-use serde_json;
 use worker as w;
-
-use crate::websocket_api;
 
 #[derive(Serialize)]
 // #[enum_from(enum_path = "ToRoomMessage", enum_variant = "Initialise")]
@@ -14,6 +12,12 @@ pub struct InitialiseMessage {
 #[derive(Serialize)]
 pub struct SubscribeMessage {
     pub subscriber_id: websocket_api::EcdsaPublicKeyWrapper,
+    pub subscription_id: u64,
+}
+
+#[derive(Serialize)]
+pub struct UnsubscribeMessage {
+    pub subscription_id: u64,
 }
 
 #[derive(Serialize)]

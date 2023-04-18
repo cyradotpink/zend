@@ -1,19 +1,11 @@
-use base64;
+use crate::util;
 use enum_convert::EnumConvert;
 use p256::{
     ecdsa,
     ecdsa::{signature::Verifier, Signature},
 };
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::fmt::Display;
-
-fn encode_base64(value: &[u8]) -> String {
-    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, value)
-}
-fn decode_base64(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
-}
 
 #[derive(Copy, Clone, Deserialize, Serialize, Debug)]
 #[serde(try_from = "String")]
@@ -64,7 +56,7 @@ impl Display for VerifyingKeyFromBase64Error {
 impl TryFrom<String> for EcdsaPublicKeyWrapper {
     type Error = VerifyingKeyFromBase64Error;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let bytes = decode_base64(&value)?;
+        let bytes = util::decode_base64(&value)?;
         Ok(Self(ecdsa::VerifyingKey::from_sec1_bytes(&bytes)?))
     }
 }
@@ -75,7 +67,7 @@ impl Into<String> for EcdsaPublicKeyWrapper {
 }
 impl Display for EcdsaPublicKeyWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&encode_base64(&self.0.to_sec1_bytes()))
+        f.write_str(&util::encode_base64(&self.0.to_sec1_bytes()))
     }
 }
 
@@ -97,13 +89,13 @@ impl Display for SignatureFromBase64Error {
 impl TryFrom<String> for EcdsaSignatureWrapper {
     type Error = SignatureFromBase64Error;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let bytes = decode_base64(&value)?;
+        let bytes = util::decode_base64(&value)?;
         Ok(Self(Signature::from_slice(&bytes.as_slice())?))
     }
 }
 impl Into<String> for EcdsaSignatureWrapper {
     fn into(self) -> String {
-        encode_base64(&self.0.to_bytes())
+        util::encode_base64(&self.0.to_bytes())
     }
 }
 impl Display for EcdsaSignatureWrapper {
@@ -112,13 +104,19 @@ impl Display for EcdsaSignatureWrapper {
     }
 }
 
-#[derive(Deserialize, Clone, Serialize, Debug)]
+#[derive(Deserialize, Clone, Copy, Serialize, Debug)]
 #[serde(try_from = "String")]
 #[serde(into = "String")]
 pub struct RoomId(pub u64);
 impl RoomId {
-    pub fn random(gen: fn() -> f64) -> Self {
-        Self((gen() * 26u64.pow(6) as f64) as u64)
+    /*pub fn random(gen: fn() -> f64) -> Self {
+        Self::from_random(gen())
+    }*/
+    pub fn from_random(random: f64) -> Self {
+        if random >= 1.0 {
+            panic!()
+        }
+        Self((random * 26u64.pow(6) as f64) as u64)
     }
 }
 impl TryFrom<String> for RoomId {
@@ -182,6 +180,11 @@ pub struct SubscribeToRoomArgs {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct UnsubscribeFromRoomArgs {
+    pub subscription_id: u64,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct AddPrivilegedPeerArgs {
     pub room_id: RoomId,
     pub allow_ecdsa_public_key: EcdsaPublicKeyWrapper,
@@ -229,6 +232,7 @@ pub struct UnicastDataArgs {
 pub enum MethodCallArgsVariants {
     CreateRoom,
     SubscribeToRoom(SubscribeToRoomArgs),
+    UnsubscribeFromRoom(UnsubscribeFromRoomArgs),
     AddPrivilegedPeer(AddPrivilegedPeerArgs),
     GetRoomDataHistory(GetRoomDataHistoryArgs),
     DeleteData(DeleteDataArgs),
@@ -422,16 +426,28 @@ pub struct MethodCallReturn {
     pub return_data: MethodCallReturnVariants,
 }
 
+#[derive(Serialize, Debug)]
+pub struct SubscriptionData {
+    pub subscription_id: u64,
+    pub room_id: RoomId,
+    pub sender_id: EcdsaPublicKeyWrapper,
+    pub nonce: Nonce,
+    pub data: serde_json::Value,
+}
+impl SubscriptionData {
+    pub fn into_message(self) -> ServerToClientMessage {
+        self.into()
+    }
+}
+
 #[derive(Serialize, Debug, EnumConvert)]
 #[enum_convert(from)]
-#[serde(
-    rename_all = "snake_case",
-    tag = "message_type",
-    content = "message_content"
-)]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "message_type", content = "message_content")]
 pub enum ServerToClientMessage {
     Pong,
     MethodCallReturn(MethodCallReturn),
+    SubscriptionData(SubscriptionData),
     Info(String),
 }
 impl ServerToClientMessage {

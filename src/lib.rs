@@ -1,20 +1,21 @@
 mod peer_api;
 mod room_api;
+mod util;
 mod websocket;
 mod websocket_api;
 mod websocket_api_handlers;
 
-use worker as w;
+use worker::*;
 
-#[w::event(fetch)]
-pub async fn fetch(req: w::Request, env: w::Env, _ctx: w::Context) -> w::Result<w::Response> {
+#[event(fetch)]
+async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.headers().get("Upgrade")? == Some("websocket".to_string()) {
-        let pair = w::WebSocketPair::new()?;
+        let pair = WebSocketPair::new()?;
         let server = pair.server;
         server.accept()?;
-        w::wasm_bindgen_futures::spawn_local(websocket::handle_ws_server(env, server));
-        w::Response::from_websocket(pair.client)
+        wasm_bindgen_futures::spawn_local(websocket::handle_ws_server(env, server));
+        Response::from_websocket(pair.client)
     } else {
-        w::Response::from_html("OK")
+        Response::from_html("OK")
     }
 }

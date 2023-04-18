@@ -16,6 +16,12 @@ type CheckExistsMessage = {
 type SubscribeMessage = {
   message_type: 'subscribe'
   subscriber_id: string
+  subscription_id: number
+}
+
+type UnsubscribeMessage = {
+  message_type: 'unsubscribe'
+  subscription_id: number
 }
 
 type AddPrivilegedPeerMessage = {
@@ -64,12 +70,14 @@ type HistoryEntry = {
 type Subscription = {
   socket: WebSocket
   subscriber_id: string
+  subscription_id: number
 }
 
 type ToRoomMessage =
   | InitialiseMessage
   | CheckExistsMessage
   | SubscribeMessage
+  | UnsubscribeMessage
   | AddPrivilegedPeerMessage
   | DeleteMessage
   | BroadcastDataMessage
@@ -122,8 +130,27 @@ export class Room {
         let pair = new WebSocketPair()
         let client = pair[0]
         let server = pair[1]
-        this.subscriptions.push({ socket: server, subscriber_id: body.subscriber_id })
+        server.addEventListener('close', _ => {
+          this.subscriptions = this.subscriptions.filter(v => v.socket !== server)
+        })
+        this.subscriptions.push({
+          socket: server,
+          subscriber_id: body.subscriber_id,
+          subscription_id: body.subscription_id
+        })
         return client
+      }
+      case 'unsubscribe': {
+        if (!(await this.exists())) return null
+        body = body as UnsubscribeMessage
+        let subscription_id = body.subscription_id
+
+        for (let { socket } of this.subscriptions.filter(
+          v => v.subscription_id == subscription_id
+        )) {
+          socket.send(JSON.stringify({ message_type: 'close' }))
+        }
+        return null
       }
       case 'add_privileged_peer': {
         body = body as AddPrivilegedPeerMessage
@@ -163,7 +190,12 @@ export class Room {
           this.state.storage.put('message_history', history)
         }
         for (let sub of this.subscriptions.filter(sub => peers.includes(sub.subscriber_id))) {
-          sub.socket.send(JSON.stringify(body.data))
+          sub.socket.send(
+            JSON.stringify({
+              message_type: 'data',
+              message_content: { data: body.data, sender_id: body.sender_id, nonce: body.nonce }
+            })
+          )
         }
         this.keepAlive(body.sender_id)
         return true
@@ -185,7 +217,12 @@ export class Room {
         }
         let id = body.receiver_id
         for (let sub of this.subscriptions.filter(sub => id == sub.subscriber_id)) {
-          sub.socket.send(JSON.stringify(body.data))
+          sub.socket.send(
+            JSON.stringify({
+              message_type: 'data',
+              message_content: { data: body.data, sender_id: body.sender_id, nonce: body.nonce }
+            })
+          )
         }
         this.keepAlive(body.sender_id)
         return true
