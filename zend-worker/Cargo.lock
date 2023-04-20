@@ -1443,10 +1443,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "zend-worker"
+name = "zend-common"
 version = "0.1.0"
 dependencies = [
- "async-std",
  "base64",
  "enum-convert",
  "futures",
@@ -1455,7 +1454,22 @@ dependencies = [
  "p256",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "zend-worker"
+version = "0.1.0"
+dependencies = [
+ "async-std",
+ "base64",
+ "futures",
+ "getrandom",
+ "hex",
+ "p256",
+ "serde",
+ "serde_json",
  "worker",
+ "zend-common",
 ]
 
 [[package]]

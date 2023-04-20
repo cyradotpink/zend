@@ -1,11 +1,16 @@
 mod peer_api;
 mod room_api;
-mod util;
 mod websocket;
-mod websocket_api;
 mod websocket_api_handlers;
 
 use worker::*;
+
+/*
+TODO
+refactor:
+    - end my habit of placing children above their parents.
+    - reduce match statement nesting.
+*/
 
 #[event(fetch)]
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {

@@ -1,8 +1,9 @@
-use crate::{peer_api, websocket_api as api};
+use crate::peer_api;
 use futures::StreamExt;
 use std::{fmt::Display, rc::Rc};
 use w::console_log;
 use worker as w;
+use zend_common::api;
 
 pub trait WebSocketExt {
     /** (n)o (f)ail (send) (j)son, given a less-than-readable name as it's

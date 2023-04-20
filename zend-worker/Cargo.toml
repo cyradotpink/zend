@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 [dependencies]
 async-std = "1"
 base64 = "0"
-enum-convert = { version = "0.1.0", path = "enum-convert" }
+zend-common = { path = "../common/zend-common" }
 futures = "0"
 getrandom = { version = "0", features = ["js"] }  # need to enable wasm feature flag in dependency tree (p256->randcore->getrandom)
 hex = "0"

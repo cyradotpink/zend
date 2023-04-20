@@ -1,17 +1,15 @@
-use crate::websocket_api;
-use enum_convert::EnumConvert;
 use serde::Serialize;
 use worker as w;
+use zend_common::{api, enum_convert::EnumConvert};
 
 #[derive(Serialize)]
-// #[enum_from(enum_path = "ToRoomMessage", enum_variant = "Initialise")]
 pub struct InitialiseMessage {
-    pub initial_peer_id: websocket_api::EcdsaPublicKeyWrapper,
+    pub initial_peer_id: api::EcdsaPublicKeyWrapper,
 }
 
 #[derive(Serialize)]
 pub struct SubscribeMessage {
-    pub subscriber_id: websocket_api::EcdsaPublicKeyWrapper,
+    pub subscriber_id: api::EcdsaPublicKeyWrapper,
     pub subscription_id: u64,
 }
 
@@ -22,37 +20,37 @@ pub struct UnsubscribeMessage {
 
 #[derive(Serialize)]
 pub struct AddPrivilegedPeerMessage {
-    pub adder_id: websocket_api::EcdsaPublicKeyWrapper,
-    pub added_id: websocket_api::EcdsaPublicKeyWrapper,
+    pub adder_id: api::EcdsaPublicKeyWrapper,
+    pub added_id: api::EcdsaPublicKeyWrapper,
 }
 
 #[derive(Serialize)]
 pub struct DeleteMessage {
-    pub deleter_id: Option<websocket_api::EcdsaPublicKeyWrapper>,
+    pub deleter_id: Option<api::EcdsaPublicKeyWrapper>,
 }
 
 #[derive(Serialize)]
 pub struct BroadcastDataMessage {
     pub data: serde_json::Value,
-    pub sender_id: websocket_api::EcdsaPublicKeyWrapper,
-    pub nonce: websocket_api::Nonce,
+    pub sender_id: api::EcdsaPublicKeyWrapper,
+    pub nonce: api::Nonce,
     pub write_history: bool,
 }
 
 #[derive(Serialize)]
 pub struct UnicastDataMessage {
     pub data: serde_json::Value,
-    pub sender_id: websocket_api::EcdsaPublicKeyWrapper,
-    pub receiver_id: websocket_api::EcdsaPublicKeyWrapper,
-    pub nonce: websocket_api::Nonce,
+    pub sender_id: api::EcdsaPublicKeyWrapper,
+    pub receiver_id: api::EcdsaPublicKeyWrapper,
+    pub nonce: api::Nonce,
     pub write_history: bool,
 }
 
 #[derive(Serialize)]
 pub struct DeleteDataMessage {
-    pub deleter_id: websocket_api::EcdsaPublicKeyWrapper,
-    pub data_sender_id: websocket_api::EcdsaPublicKeyWrapper,
-    pub data_nonce: websocket_api::Nonce,
+    pub deleter_id: api::EcdsaPublicKeyWrapper,
+    pub data_sender_id: api::EcdsaPublicKeyWrapper,
+    pub data_nonce: api::Nonce,
 }
 
 #[derive(Serialize, EnumConvert)]

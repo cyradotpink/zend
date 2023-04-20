@@ -74,10 +74,10 @@ impl Display for EcdsaPublicKeyWrapper {
 #[derive(Deserialize, Clone, Serialize, Debug)]
 #[serde(try_from = "String")]
 #[serde(into = "String")]
-struct EcdsaSignatureWrapper(Signature);
+pub struct EcdsaSignatureWrapper(Signature);
 #[derive(Debug, EnumConvert)]
 #[enum_convert(from)]
-enum SignatureFromBase64Error {
+pub enum SignatureFromBase64Error {
     BytesFromBase64Error(base64::DecodeError),
     SignatureFromBytesError(ecdsa::signature::Error),
 }

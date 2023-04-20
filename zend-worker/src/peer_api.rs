@@ -1,11 +1,11 @@
-use crate::websocket_api;
 use serde::Serialize;
 use worker as w;
+use zend_common::api;
 
 #[derive(Serialize)]
 pub struct CheckNonceMessage {
     #[serde(flatten)]
-    pub nonce: websocket_api::Nonce,
+    pub nonce: api::Nonce,
 }
 
 #[derive(Serialize)]
