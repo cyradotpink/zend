@@ -1,11 +1,10 @@
-use core::panic;
 use std::{cell::RefCell, time::Duration};
 
-use futures::stream::StreamExt;
+use futures::{future, stream::StreamExt};
 use pharos::{Events, Observable, ObserveConfig};
 use wasm_bindgen::prelude::*;
 use web_sys::WebSocket;
-use ws_stream_wasm::{WsErr, WsEvent, WsMessage, WsMeta, WsStream};
+use ws_stream_wasm::{WsEvent, WsMessage, WsMeta, WsStream};
 
 #[wasm_bindgen]
 extern "C" {
@@ -18,63 +17,83 @@ pub enum WrappedSocketEvent {
     Connected,
     /// Seconds until next reconnection attempt
     Reconnecting(u64),
-    Message(String),
-    Disconnected(String),
+    TextMessage(String),
+    BinaryMessage(Vec<u8>),
+    Disconnected(&'static str),
 }
 struct WebSocketWrap {
     finished: bool,
     url: String,
     ws: Option<(WsStream, Events<WsEvent>)>,
     retry_after: u64,
+    close_timeout: Duration,
 }
 impl WebSocketWrap {
-    fn new(url: &str) -> Self {
+    fn new(url: &str, close_timeout: Option<Duration>) -> Self {
         Self {
             finished: false,
             url: url.into(),
             ws: None,
             retry_after: 0,
+            close_timeout: close_timeout.unwrap_or(Duration::MAX),
         }
     }
 
-    async fn connect(&mut self) -> Result<(WsStream, Events<WsEvent>), WsErr> {
-        let (mut ws, wsio) = WsMeta::connect(&self.url, None).await?;
-        let events = ws.observe(ObserveConfig::default()).await.unwrap();
+    async fn connect(&mut self) -> Result<(WsStream, Events<WsEvent>), &'static str> {
+        let connect_future = Box::pin(WsMeta::connect(&self.url, None));
+        let timeout_future = gloo_timers::future::sleep(Duration::from_secs(5));
+        let select = future::select(connect_future, timeout_future).await;
+        let (mut ws, wsio) = match select {
+            future::Either::Left((value, _)) => value.map_err(|_| "WsErr")?,
+            future::Either::Right(_) => return Err("Timeout"),
+        };
+        let events = ws.observe(ObserveConfig::default()).await.unwrap_throw();
         Ok((wsio, events))
     }
     async fn next_event(&mut self) -> Option<WrappedSocketEvent> {
         if self.finished {
-            log("finsdf");
             return None;
         }
         if let Some((wsio, events)) = &mut self.ws {
-            if let Some(msg) = wsio.next().await {
-                if let WsMessage::Text(s) = msg {
-                    return Some(WrappedSocketEvent::Message(s));
-                } else {
-                    return Some(WrappedSocketEvent::Message("".to_string()));
+            // let next_future = wsio.next();
+            let timeout_future = gloo_timers::future::sleep(self.close_timeout);
+            let next_result = match future::select(wsio.next(), timeout_future).await {
+                future::Either::Left((v, _)) => v,
+                future::Either::Right(_) => {
+                    if let Some((wsio, _)) = self.ws.take() {
+                        wsio.wrapped().close().expect_throw(
+                            "Something went wrong when closing a websocket connection",
+                        );
+                    }
+                    return Some(WrappedSocketEvent::Reconnecting(self.retry_after));
                 }
-            }
+            };
+            if let Some(msg) = next_result {
+                return Some(match msg {
+                    WsMessage::Text(msg) => WrappedSocketEvent::TextMessage(msg),
+                    WsMessage::Binary(msg) => WrappedSocketEvent::BinaryMessage(msg),
+                });
+            };
             let close_event = loop {
                 match events.next().await {
                     Some(WsEvent::Closed(ev)) => break ev,
                     Some(_) => continue,
                     None => {
                         self.finished = true;
-                        return Some(WrappedSocketEvent::Disconnected("Unreachable".to_string()));
+                        return Some(WrappedSocketEvent::Disconnected("Unreachable code reached"));
                     }
                 }
             };
             if close_event.was_clean {
                 self.finished = true;
-                return Some(WrappedSocketEvent::Disconnected("Clean".to_string()));
+                return Some(WrappedSocketEvent::Disconnected("Clean"));
             }
-            self.ws = None;
+            self.ws.take();
             return Some(WrappedSocketEvent::Reconnecting(self.retry_after));
         }
         if self.retry_after > 0 {
             gloo_timers::future::sleep(Duration::from_secs(self.retry_after)).await;
-            // Exponential back-off maxing out at 60 seconds
+            // Exponential backoff maxing out at 60 seconds
             self.retry_after = if self.retry_after * 2 > 60 {
                 60
             } else {
@@ -83,25 +102,29 @@ impl WebSocketWrap {
         } else {
             self.retry_after = 5;
         }
-        if let Ok(new) = self.connect().await {
-            self.retry_after = 0;
-            self.ws = Some(new);
-            return Some(WrappedSocketEvent::Connected);
-        }
-        Some(WrappedSocketEvent::Reconnecting(self.retry_after))
+        Some(match self.connect().await {
+            Ok(new) => {
+                self.retry_after = 0;
+                let _ = self.ws.insert(new);
+                WrappedSocketEvent::Connected
+            }
+            Err(err) => {
+                log(err);
+                WrappedSocketEvent::Reconnecting(self.retry_after)
+            }
+        })
     }
 }
 
 // At least I'm keeping the refcell crimes contained in their own little refcell crimes struct
-pub struct MutWrap {
+pub struct WsRefCellWrap {
     ws_wrap: RefCell<WebSocketWrap>,
-    // References never held across awaits, therefore "safe" to mutate
     ws_copy: RefCell<Option<WebSocket>>,
 }
-impl MutWrap {
-    pub fn new(url: &str) -> Self {
+impl WsRefCellWrap {
+    pub fn new(url: &str, close_timeout: Option<Duration>) -> Self {
         Self {
-            ws_wrap: RefCell::new(WebSocketWrap::new(url)),
+            ws_wrap: RefCell::new(WebSocketWrap::new(url, close_timeout)),
             ws_copy: RefCell::new(None),
         }
     }
@@ -112,7 +135,10 @@ impl MutWrap {
         }
     }
     pub async fn next_event(&self) -> Option<WrappedSocketEvent> {
-        let mut wrap = self.ws_wrap.borrow_mut();
+        let mut wrap = self
+            .ws_wrap
+            .try_borrow_mut()
+            .expect_throw("You ran next_event() twice at the same time. Don't do that :(");
         let event = wrap.next_event().await?;
         match event {
             WrappedSocketEvent::Connected => {
@@ -121,7 +147,7 @@ impl MutWrap {
                     let _ = ws.insert(new.0.wrapped().clone());
                 }
             }
-            WrappedSocketEvent::Disconnected(_) => {
+            WrappedSocketEvent::Reconnecting(_) => {
                 let mut ws = self.ws_copy.borrow_mut();
                 ws.take();
             }

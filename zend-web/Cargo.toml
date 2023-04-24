@@ -24,4 +24,4 @@ serde = "1.0.160"
 
 [dependencies.web-sys]
 version = "0.3.61"
-features = ["Window", "Document", "Element", "HtmlDocument", "HtmlElement", "MessageEvent", "WebSocket", "BinaryType", "Blob", "ProgressEvent", "FileReader", "ErrorEvent"]
+features = ["Window", "Document", "Element", "HtmlDocument", "HtmlElement", "MessageEvent", "WebSocket", "BinaryType", "Blob", "ProgressEvent", "FileReader", "ErrorEvent", "Performance"]
