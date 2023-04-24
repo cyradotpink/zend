@@ -165,35 +165,35 @@ impl Display for RoomId {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct MethodCallCommonArgs {
     pub ecdsa_public_key: EcdsaPublicKeyWrapper,
     pub nonce: Nonce,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct SubscribeToRoomArgs {
     pub room_id: RoomId,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct UnsubscribeFromRoomArgs {
     pub subscription_id: u64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct AddPrivilegedPeerArgs {
     pub room_id: RoomId,
     pub allow_ecdsa_public_key: EcdsaPublicKeyWrapper,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct GetRoomDataHistoryArgs {
     pub room_id: RoomId,
     pub from_timestamp: u64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct DeleteDataArgs {
     pub room_id: RoomId,
     pub data_sender_key: EcdsaPublicKeyWrapper,
@@ -223,7 +223,7 @@ pub struct UnicastDataArgs {
     pub common_args: SendDataCommonArgs,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(tag = "method_name", content = "method_arguments")]
 #[serde(rename_all = "snake_case")]
 pub enum MethodCallArgsVariants {
@@ -237,7 +237,7 @@ pub enum MethodCallArgsVariants {
     UnicastData(UnicastDataArgs),
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(try_from = "serde_json::Value")]
 pub struct MethodCallContent {
     pub common_arguments: MethodCallCommonArgs,
@@ -262,7 +262,7 @@ impl TryFrom<serde_json::Value> for MethodCallContent {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(try_from = "String")]
 pub struct MethodCall {
     json: String,
@@ -287,7 +287,7 @@ pub struct SignedMethodCallPartial {
     extra: serde_json::Value,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct SignedMethodCall {
     pub call_id: u64,
     pub signed_call: MethodCall,
@@ -308,7 +308,7 @@ impl SignedMethodCall {
     }
 }
 
-#[derive(Deserialize, Debug, EnumConvert)]
+#[derive(Deserialize, Serialize, Debug, EnumConvert)]
 #[enum_convert(from, into)]
 #[serde(try_from = "SignedMethodCallPartial")]
 pub enum SignedMethodCallOrPartial {
@@ -332,7 +332,7 @@ impl From<SignedMethodCallPartial> for SignedMethodCallOrPartial {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 #[serde(
     rename_all = "snake_case",
     tag = "message_type",
