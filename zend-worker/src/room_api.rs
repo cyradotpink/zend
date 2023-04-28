@@ -10,7 +10,6 @@ pub struct InitialiseMessage {
 #[derive(Serialize)]
 pub struct SubscribeMessage {
     pub subscriber_id: api::EcdsaPublicKeyWrapper,
-    pub subscription_id: u64,
 }
 
 #[derive(Serialize)]

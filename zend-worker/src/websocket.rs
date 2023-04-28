@@ -107,7 +107,7 @@ async fn handle_signed_method_call(
     let result = match variant_args {
         Method::CreateRoom => h::create_room(env, common_args).await,
         Method::SubscribeToRoom(args) => {
-            h::subscribe_to_room(env, server.clone(), common_args, args, signed_call.call_id).await
+            h::subscribe_to_room(env, server.clone(), common_args, args).await
         }
         Method::UnsubscribeFromRoom(_) => h::unsubscribe_from_room().await,
         Method::AddPrivilegedPeer(args) => {

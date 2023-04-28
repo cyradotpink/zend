@@ -337,12 +337,17 @@ pub enum ClientToServerMessage {
     SignedMethodCall(SignedMethodCallOrPartial),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRoomSuccess {
     pub room_id: RoomId,
 }
 
-#[derive(Debug, Serialize, Deserialize, EnumConvert)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeSuccess {
+    pub subscription_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, EnumConvert)]
 #[serde(untagged)]
 #[enum_convert(from)]
 pub enum MethodCallSuccess {
@@ -351,10 +356,11 @@ pub enum MethodCallSuccess {
     // into an actual type.
     Value(serde_json::Value),
     CreateRoom(CreateRoomSuccess),
+    SubscribeToRoom(SubscribeSuccess),
     Ack,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorId {
     InternalError,
@@ -387,7 +393,7 @@ impl ErrorId {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MethodCallError {
     error_id: ErrorId,
     message: Option<String>,
@@ -397,8 +403,13 @@ impl From<ErrorId> for MethodCallError {
         error_id.with_default_message()
     }
 }
+impl MethodCallError {
+    pub fn internal() -> Self {
+        ErrorId::InternalError.with_default_message()
+    }
+}
 
-#[derive(Debug, Serialize, Deserialize, EnumConvert)]
+#[derive(Debug, Clone, Serialize, Deserialize, EnumConvert)]
 #[serde(rename_all = "snake_case", tag = "return_type")]
 #[serde(content = "return_data")]
 #[enum_convert(from)]
@@ -407,14 +418,14 @@ pub enum MethodCallReturnVariants {
     Error(MethodCallError),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MethodCallReturn {
     pub call_id: u64,
     #[serde(flatten)]
     pub return_data: MethodCallReturnVariants,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscriptionData {
     pub subscription_id: u64,
     pub room_id: RoomId,
@@ -428,7 +439,7 @@ impl SubscriptionData {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, EnumConvert)]
+#[derive(Debug, Clone, Serialize, Deserialize, EnumConvert)]
 #[enum_convert(from)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "message_type", content = "message_content")]

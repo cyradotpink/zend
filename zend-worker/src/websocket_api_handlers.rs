@@ -21,6 +21,7 @@ struct SubscriptionDataMessage {
 enum FromRoomMessage {
     Close,
     Data(SubscriptionDataMessage),
+    SubscriptionId(u64),
 }
 
 fn get_room_stub(env: &w::Env, room_id: api::RoomId) -> Result<w::Stub, w::Error> {
@@ -46,14 +47,11 @@ pub async fn create_room(
     common_args: api::MethodCallCommonArgs,
 ) -> Result<api::MethodCallSuccess, Error> {
     let namespace = env.durable_object("ROOM")?;
-    let mut room_id: Option<api::RoomId> = None;
-    while let None = room_id {
+    let room_id = loop {
         let tmp_id = api::RoomId::from_random(
             util::math_random().map_err(|_| api::ErrorId::InternalError.with_default_message())?,
         );
         let tmp_stub = namespace.id_from_name(&tmp_id.to_string())?.get_stub()?;
-        // Create a new request every iteration instead of cloning to save an allocation
-        // because in the most likely case, the loop exits after the first iteration
         let request = room_api::InitialiseMessage {
             initial_peer_id: common_args.ecdsa_public_key.clone(),
         }
@@ -61,39 +59,26 @@ pub async fn create_room(
         let mut response = tmp_stub.fetch_with_request(request).await?;
         let success = serde_json::from_str(&response.text().await?)?;
         if success {
-            room_id = Some(tmp_id)
+            break tmp_id;
         }
-    }
-    // Reasonable unwrap because the loop condition forces room_id to be Some here
-    let room_id = room_id.unwrap();
+    };
     Ok(api::CreateRoomSuccess { room_id }.into())
 }
 
 // TODO possibly reconnect to the room object if the connection dies?
 // if this turns out to be a rare occurence, this work could be offloaded to the client
 async fn subscriber_background_future(
-    env: Rc<w::Env>,
+    _env: Rc<w::Env>,
     server: Rc<w::WebSocket>,
-    common_args: api::MethodCallCommonArgs,
-    args: api::SubscribeToRoomArgs,
+    room_client: w::WebSocket,
     subscription_id: u64,
+    _common_args: api::MethodCallCommonArgs,
+    args: api::SubscribeToRoomArgs,
 ) -> Result<(), Error> {
     let room_id = args.room_id;
-    let request = room_api::SubscribeMessage {
-        subscriber_id: common_args.ecdsa_public_key,
-        subscription_id,
-    }
-    .into_request()?;
-    let stub = get_room_stub(env.as_ref(), room_id)?;
-    let response = stub.fetch_with_request(request).await?;
-    let ws_client = match response.websocket() {
-        Some(ws_client) => ws_client,
-        None => {
-            return Ok(());
-        }
-    };
-    ws_client.accept()?;
-    let mut event_stream = server.events()?;
+
+    let mut event_stream = room_client.events()?;
+
     while let Some(result) = event_stream.next().await {
         let event = match result {
             Err(err) => {
@@ -116,10 +101,11 @@ async fn subscriber_background_future(
         let message = serde_json::from_str::<FromRoomMessage>(&text)?;
         let data_message = match message {
             FromRoomMessage::Close => {
-                ws_client.close(None, None::<&str>)?;
+                room_client.close(None, None::<&str>)?;
                 break;
             }
             FromRoomMessage::Data(data_message) => data_message,
+            _ => continue,
         };
         server.nfsendj(
             &api::SubscriptionData {
@@ -134,18 +120,45 @@ async fn subscriber_background_future(
     }
     Ok(())
 }
+
 pub async fn subscribe_to_room(
     env: Rc<w::Env>,
     server: Rc<w::WebSocket>,
     common_args: api::MethodCallCommonArgs,
     args: api::SubscribeToRoomArgs,
-    subscription_id: u64,
 ) -> Result<api::MethodCallSuccess, Error> {
+    let room_id = args.room_id;
+    let request = room_api::SubscribeMessage {
+        subscriber_id: common_args.ecdsa_public_key.clone(),
+    }
+    .into_request()?;
+    let stub = get_room_stub(env.as_ref(), room_id)?;
+    let response = stub.fetch_with_request(request).await?;
+    let subscription_id: u64 = response
+        .headers()
+        .get("Subscription-Id")?
+        .ok_or(api::MethodCallError::internal())?
+        .parse()
+        .map_err(|_| api::MethodCallError::internal())?;
+    let ws_client = match response.websocket() {
+        Some(ws_client) => ws_client,
+        None => {
+            return Ok(api::SubscribeSuccess { subscription_id }.into());
+        }
+    };
+    ws_client.accept()?;
+
     w::wasm_bindgen_futures::spawn_local(async move {
-        let result =
-            subscriber_background_future(env, server.clone(), common_args, args, subscription_id)
-                .await;
-        // TODO actual handling
+        let result = subscriber_background_future(
+            env,
+            server.clone(),
+            ws_client,
+            subscription_id,
+            common_args,
+            args,
+        )
+        .await;
+        // TODO actual handling?
         match result {
             Ok(_) => {
                 console_log!("A websocket ended")
@@ -156,7 +169,7 @@ pub async fn subscribe_to_room(
         }
     });
 
-    Ok(api::MethodCallSuccess::Ack)
+    Ok(api::SubscribeSuccess { subscription_id }.into())
 }
 
 pub async fn unsubscribe_from_room() -> Result<api::MethodCallSuccess, Error> {

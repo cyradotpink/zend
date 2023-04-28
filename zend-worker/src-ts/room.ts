@@ -16,7 +16,6 @@ type CheckExistsMessage = {
 type SubscribeMessage = {
   message_type: 'subscribe'
   subscriber_id: string
-  subscription_id: number
 }
 
 type UnsubscribeMessage = {
@@ -100,6 +99,17 @@ export class Room {
     return result
   }
 
+  async getNextSubId(): Promise<number> {
+    let next: number | undefined = await this.state.storage.get('subscription_id')
+    // Randomly initialise subscription ID and restrict to same range as initial choice
+    // to avoid leaking information about the existence of rooms
+    if (next === undefined) {
+      next = crypto.getRandomValues(new Uint32Array(1))[0] // cryptographically random 32 bit uint
+    }
+    this.state.storage.put('subscription_id', (next + 1) % 2 ** 32)
+    return next
+  }
+
   async exists(): Promise<boolean> {
     return (await this.getPrivilegedPeers()).length > 0
   }
@@ -109,7 +119,7 @@ export class Room {
     this.state.storage.setAlarm(Date.now() + 20 * 60 * 1000)
   }
 
-  async handleFetch(body: ToRoomMessage): Promise<null | boolean | WebSocket> {
+  async handleFetch(body: ToRoomMessage): Promise<null | boolean | [number, WebSocket | null]> {
     switch (body.message_type) {
       case 'check_exists': {
         return await this.exists()
@@ -125,7 +135,8 @@ export class Room {
         return true
       }
       case 'subscribe': {
-        if (!(await this.exists())) return null
+        let subscription_id = await this.getNextSubId()
+        if (!(await this.exists())) return [subscription_id, null]
         body = body as SubscribeMessage
         let pair = new WebSocketPair()
         let client = pair[0]
@@ -136,9 +147,12 @@ export class Room {
         this.subscriptions.push({
           socket: server,
           subscriber_id: body.subscriber_id,
-          subscription_id: body.subscription_id
+          subscription_id
         })
-        return client
+        client.send(
+          JSON.stringify({ message_type: 'subscription_id', message_content: subscription_id })
+        )
+        return [subscription_id, client]
       }
       case 'unsubscribe': {
         if (!(await this.exists())) return null
@@ -177,7 +191,7 @@ export class Room {
         if (!(await this.exists())) return false
         body = body as BroadcastDataMessage
         let result = await this.state.storage.get(['message_history', 'privileged_peers'])
-        let peers = (result.get('privileged_peers') as string[] | undefined) || []
+        let privileged_peers = (result.get('privileged_peers') as string[] | undefined) || []
         if (body.write_history) {
           let history = (result.get('message_history') as HistoryEntry[] | undefined) || []
           history.push({
@@ -189,7 +203,9 @@ export class Room {
           })
           this.state.storage.put('message_history', history)
         }
-        for (let sub of this.subscriptions.filter(sub => peers.includes(sub.subscriber_id))) {
+        for (let sub of this.subscriptions.filter(sub =>
+          privileged_peers.includes(sub.subscriber_id)
+        )) {
           sub.socket.send(
             JSON.stringify({
               message_type: 'data',
@@ -248,8 +264,14 @@ export class Room {
   async fetch(request: Request): Promise<Response> {
     let body: ToRoomMessage = await request.json()
     let responseBody = await this.handleFetch(body)
-    if (responseBody instanceof WebSocket) {
-      return new Response(JSON.stringify(null))
+    if (responseBody instanceof Array) {
+      let [id, ws] = responseBody
+      // return new Response(JSON.stringify(null))
+      return new Response(ws ? null : '', {
+        status: ws ? 101 : 200,
+        webSocket: ws,
+        headers: { 'Subscription-Id': id.toString() }
+      })
     } else {
       return new Response(JSON.stringify(responseBody))
     }
