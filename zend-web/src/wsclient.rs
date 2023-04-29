@@ -1,12 +1,8 @@
-use std::{
-    cell::{Ref, RefCell},
-    rc::Rc,
-    time::Duration,
-};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use futures::{channel::mpsc, future, stream::StreamExt};
 use pharos::{Events, Observable, ObserveConfig};
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::{wasm_bindgen, UnwrapThrowExt};
 use web_sys::WebSocket;
 use ws_stream_wasm::{WsEvent, WsMessage, WsMeta, WsStream};
 use zend_common::api;
@@ -36,6 +32,8 @@ pub enum WrappedSocketEvent {
     BinaryMessage(Vec<u8>),
     Ended(&'static str),
 }
+
+#[derive(Debug)]
 struct WebSocketWrap {
     finished: bool,
     url: String, // Could maybe be a &str but not really worth it I think
@@ -132,6 +130,7 @@ impl WebSocketWrap {
     }
 }
 
+#[derive(Debug)]
 pub struct WsRefCellWrap {
     ws_wrap: RefCell<WebSocketWrap>,
     ws_copy: RefCell<Option<WebSocket>>,
@@ -172,11 +171,18 @@ impl WsRefCellWrap {
     }
 }
 
-enum WebSocketState {
+#[derive(Debug, PartialEq, Eq)]
+pub enum WebSocketState {
     Connected,
     Reconnecting,
     Ended,
 }
+impl Into<Vec<Self>> for WebSocketState {
+    fn into(self) -> Vec<Self> {
+        vec![self]
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ApiClientEvent {
     Connected,
@@ -184,6 +190,9 @@ pub enum ApiClientEvent {
     ApiMessage(zend_common::api::ServerToClientMessage),
     Ended,
 }
+
+#[allow(unused)]
+#[derive(Debug)]
 pub enum SubscriptionEventFilter {
     Any,
     Connected,
@@ -200,15 +209,20 @@ impl Into<Vec<Self>> for SubscriptionEventFilter {
     }
 }
 
+#[derive(Debug)]
 enum EventSubscriptionType {
     Once,
     Persistent,
 }
+
+#[derive(Debug)]
 struct EventSubscription {
     event_filters: Vec<SubscriptionEventFilter>,
     sender: mpsc::Sender<ApiClientEvent>,
     subscriber_type: EventSubscriptionType,
 }
+
+#[derive(Debug, Clone)]
 pub struct WsApiClient {
     // I'm very annoyed by all this reference counting and interior mutability,
     // but it is necessary because these values are used in background tasks-
@@ -217,7 +231,6 @@ pub struct WsApiClient {
     subscribers: Rc<RefCell<Vec<EventSubscription>>>,
     ws_state: Rc<RefCell<WebSocketState>>,
 }
-#[allow(unused)]
 impl WsApiClient {
     pub fn new(url: &str) -> Self {
         let subscribers = Rc::new(RefCell::new(Vec::<EventSubscription>::new()));
@@ -232,24 +245,40 @@ impl WsApiClient {
             while let Some(event) = ws_ref.next_event().await {
                 handle_event(event, &subscriptions_ref, &ws_state_ref)
             }
+            subscriptions_ref
+                .borrow_mut()
+                .iter_mut()
+                .for_each(|v| v.sender.close_channel())
         });
-        let ws_ref = ws.clone();
-        // TODO Implement logic to only send when ws state is connected
-        wasm_bindgen_futures::spawn_local(async move {
-            loop {
-                gloo_timers::future::sleep(Duration::from_secs(10)).await;
-                ws_ref.send(
-                    &serde_json::to_string(&zend_common::api::ClientToServerMessage::Ping)
-                        .unwrap_throw(),
-                );
-            }
-        });
-        Self {
+        let api_client = Self {
             ws,
             subscribers,
             ws_state,
-        }
+        };
+        let api_client_ref = api_client.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            loop {
+                match api_client_ref.await_state(WebSocketState::Connected).await {
+                    Err(_) => break, // Ws ended and will never connect again
+                    _ => {}          // Ws was already connected or became connected after some time
+                }
+                api_client_ref.send_message(&api::ClientToServerMessage::Ping);
+                let timer_fut = gloo_timers::future::sleep(Duration::from_secs(10));
+                let disconnect_fut =
+                    Box::pin(api_client_ref.await_state(WebSocketState::Reconnecting));
+                // if disconnect is ok continue, if disconnect is err break, if timer returns send ping
+                match future::select(timer_fut, disconnect_fut).await {
+                    // Ended before timer completed, stop iterating
+                    future::Either::Right((Err(()), _)) => break,
+                    // Disconnected before timer completed, continue iterating or
+                    // timer completed, continue iterating
+                    _ => {}
+                }
+            }
+        });
+        api_client
     }
+
     pub fn send_message(&self, message: &api::ClientToServerMessage) {
         let message = match serde_json::to_string(message) {
             Ok(v) => v,
@@ -257,6 +286,7 @@ impl WsApiClient {
         };
         self.ws.send(&message);
     }
+
     fn register_event_subscription(
         &self,
         subscriber_type: EventSubscriptionType,
@@ -270,6 +300,7 @@ impl WsApiClient {
         });
         receiver
     }
+
     pub async fn await_one_event<T: Into<Vec<SubscriptionEventFilter>>>(
         &self,
         filters: T,
@@ -278,6 +309,25 @@ impl WsApiClient {
             self.register_event_subscription(EventSubscriptionType::Once, filters.into());
         receiver.next().await.ok_or(())
     }
+
+    pub async fn await_state<T: Into<Vec<WebSocketState>>>(&self, states: T) -> Result<(), ()> {
+        let states: Vec<WebSocketState> = states.into();
+        let current_state = self.ws_state.borrow();
+        if states.iter().any(|v| v == &*current_state) {
+            return Ok(());
+        }
+        drop(current_state);
+        let state_filter: Vec<SubscriptionEventFilter> = states
+            .into_iter()
+            .map(|v| match v {
+                WebSocketState::Connected => SubscriptionEventFilter::Connected,
+                WebSocketState::Reconnecting => SubscriptionEventFilter::Reconnecting,
+                WebSocketState::Ended => SubscriptionEventFilter::Ended,
+            })
+            .collect();
+        self.await_one_event(state_filter).await.map(|_| ())
+    }
+
     pub fn receive_events<T: Into<Vec<SubscriptionEventFilter>>>(
         &self,
         filters: T,
@@ -349,7 +399,6 @@ fn event_is_matched_by_any_filter(
     event: &ApiClientEvent,
     filters: &Vec<SubscriptionEventFilter>,
 ) -> bool {
-    use zend_common::api;
     macro_rules! match_event {
         ($i:ident) => {
             let_is!(ApiClientEvent::$i = event)
