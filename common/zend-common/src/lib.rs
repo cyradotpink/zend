@@ -1,4 +1,4 @@
-pub mod _externs {
+pub mod _use {
     pub use js_sys;
     pub use wasm_bindgen;
     pub use web_sys;

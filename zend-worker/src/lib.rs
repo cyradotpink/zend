@@ -8,19 +8,12 @@ use worker::*;
 
 thread_local!(static HOOK_SET: Cell<bool> = Cell::new(false));
 
-/*
-TODO
-refactor:
-    - end my habit of placing children above their parents.
-    - reduce match statement nesting.
-*/
-
 #[event(fetch)]
 async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     HOOK_SET.with(|is_set| {
         if !is_set.get() {
             zend_common::log!("Set panic hook :3");
-            std::panic::set_hook(Box::new(|v| {
+            std::panic::set_hook(Box::new(|v: &std::panic::PanicInfo| {
                 zend_common::log!("Rust panicked qwq\n{}", v);
             }));
             is_set.set(true);
