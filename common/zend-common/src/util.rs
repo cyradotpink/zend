@@ -14,3 +14,18 @@ pub fn encode_base64(value: &[u8]) -> String {
 pub fn decode_base64(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
 }
+
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        let arr = $crate::_externs::js_sys::Array::new_with_length(3);
+        arr.set(
+            0,
+            $crate::_externs::wasm_bindgen::JsValue::from_str(&format!("%c[{}:{}]", ::std::file!(), ::std::line!())),
+        );
+        arr.set(1, $crate::_externs::wasm_bindgen::JsValue::from_str("font-weight: bold"));
+        let s = ::std::fmt::format(format_args!($($arg)*));
+        arr.set(2, $crate::_externs::wasm_bindgen::JsValue::from_str(&s));
+        $crate::_externs::web_sys::console::log(&arr);
+    }};
+}

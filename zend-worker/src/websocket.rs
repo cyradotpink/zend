@@ -1,9 +1,8 @@
 use crate::peer_api;
 use futures::StreamExt;
 use std::{fmt::Display, rc::Rc};
-use w::console_log;
 use worker as w;
-use zend_common::api;
+use zend_common::{api, log};
 
 pub trait WebSocketExt {
     /** (n)o (f)ail (send) (j)son, given a less-than-readable name as it's
@@ -17,16 +16,16 @@ impl WebSocketExt for w::WebSocket {
     fn nfsendj<T: serde::Serialize>(&self, data: &T) {
         match serde_json::to_string(data) {
             Ok(json) => match self.send_with_str(json) {
-                Ok(_) => console_log!("Successfully sent a message."),
-                Err(err) => console_log!("Failed to send a message. {}", err),
+                Ok(_) => log!("Successfully sent a message."),
+                Err(err) => log!("Failed to send a message. {}", err),
             },
-            Err(err) => console_log!("Failed to serialise a message. {}", err),
+            Err(err) => log!("Failed to serialise a message. {}", err),
         }
     }
     fn nfsendj_unwrap<T: serde::Serialize, U: Display>(&self, result: &Result<T, U>) {
         match result {
             Ok(data) => self.nfsendj(data),
-            Err(err) => console_log!("Failed to unwrap a result. {}", err),
+            Err(err) => log!("Failed to unwrap a result. {}", err),
         }
     }
 }
@@ -51,12 +50,12 @@ async fn check_signed_method_call(
     signed_call: &api::SignedMethodCall,
 ) -> Result<(), CheckSignedMethodCallError> {
     if let Err(err) = signed_call.validate_signature() {
-        console_log!("Call signature validation failed. {}", err);
+        log!("Call signature validation failed. {}", err);
         return Err(().into());
     }
     let current_time_secs = w::Date::now().as_millis() / 1000;
     if !signed_call.validate_timestamp(current_time_secs) {
-        console_log!("Call timestamp validation failed.");
+        log!("Call timestamp validation failed.");
         return Err(().into());
     }
     let peer = env
@@ -91,7 +90,7 @@ async fn handle_signed_method_call(
     server: Rc<w::WebSocket>,
 ) -> Result<(), ()> {
     if let Err(e) = check_signed_method_call(env.as_ref(), &signed_call).await {
-        console_log!("Error when checking signed method call: {:?}", e);
+        log!("Error when checking signed method call: {:?}", e);
         server.nfsendj(&api::ServerToClientMessage::call_error(
             signed_call.call_id,
             api::ErrorId::InvalidSignature,
@@ -122,7 +121,7 @@ async fn handle_signed_method_call(
         Ok(result) => api::ServerToClientMessage::from_success(signed_call.call_id, result),
         Err(err) => match err {
             h::Error::WorkerError(err) => {
-                console_log!("An internal error occured: {}", err);
+                log!("An internal error occured: {}", err);
                 api::ServerToClientMessage::from_error(
                     signed_call.call_id,
                     api::ErrorId::InternalError.with_default_message(),
@@ -142,7 +141,7 @@ async fn handle_parsed_message(
     message: api::ClientToServerMessage,
     server: Rc<w::WebSocket>,
 ) {
-    console_log!("{:?}", message);
+    log!("{:?}", message);
     match message {
         api::ClientToServerMessage::Ping => {
             server.nfsendj(&api::ServerToClientMessage::pong());
@@ -162,14 +161,14 @@ async fn handle_parsed_message(
 }
 
 async fn handle_message(env: Rc<w::Env>, text: String, server: Rc<w::WebSocket>) {
-    // console_log!("{:?}", text);
+    // log!("{:?}", text);
     match serde_json::from_str::<api::ClientToServerMessage>(&text) {
         Ok(message) => handle_parsed_message(env, message, server).await,
         Err(err) => {
             server.nfsendj(&api::ServerToClientMessage::info(
                 "A message failed to be parsed.",
             ));
-            console_log!("Failed to parse a message. {}", err);
+            log!("Failed to parse a message. {}", err);
         }
     }
 }
@@ -181,7 +180,7 @@ pub async fn handle_ws_server(env: w::Env, server: w::WebSocket) {
     let mut event_stream = match server.events() {
         Ok(stream) => stream,
         Err(err) => {
-            console_log!("Could not open a websocket stream: {}", err);
+            log!("Could not open a websocket stream: {}", err);
             return;
         }
     };
@@ -189,7 +188,7 @@ pub async fn handle_ws_server(env: w::Env, server: w::WebSocket) {
     while let Some(result) = event_stream.next().await {
         let event = match result {
             Err(err) => {
-                console_log!(
+                log!(
                     "{} - Error in websocket: {}",
                     w::Date::now().as_millis(),
                     err
@@ -200,13 +199,13 @@ pub async fn handle_ws_server(env: w::Env, server: w::WebSocket) {
         };
         let message_event = match event {
             w::WebsocketEvent::Close(event) => {
-                console_log!("{} - {:#?}", w::Date::now().as_millis(), event);
+                log!("{} - {:#?}", w::Date::now().as_millis(), event);
                 break;
             }
             w::WebsocketEvent::Message(message_event) => message_event,
         };
         match message_event.text() {
-            None => console_log!("no text :("),
+            None => log!("no text :("),
             Some(text) => w::wasm_bindgen_futures::spawn_local(handle_message(
                 env.clone(),
                 text,
@@ -214,5 +213,5 @@ pub async fn handle_ws_server(env: w::Env, server: w::WebSocket) {
             )),
         }
     }
-    console_log!("closed :)");
+    log!("closed :)");
 }

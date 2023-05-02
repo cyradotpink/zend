@@ -5,8 +5,8 @@ use crate::{
 use async_std::stream::StreamExt;
 use serde::Deserialize;
 use std::rc::Rc;
-use worker::{self as w, console_log};
-use zend_common::{api, enum_convert::EnumConvert, util};
+use worker::{self as w};
+use zend_common::{api, enum_convert::EnumConvert, log, util};
 
 #[derive(Deserialize)]
 struct SubscriptionDataMessage {
@@ -82,14 +82,14 @@ async fn subscriber_background_future(
     while let Some(result) = event_stream.next().await {
         let event = match result {
             Err(err) => {
-                console_log!("Error in connection to room: {}", err);
+                log!("Error in connection to room: {}", err);
                 break;
             }
             Ok(event) => event,
         };
         let message = match event {
             w::WebsocketEvent::Close(event) => {
-                console_log!("(Connection to room closed) {:#?}", event);
+                log!("(Connection to room closed) {:#?}", event);
                 break;
             }
             w::WebsocketEvent::Message(message) => message,
@@ -161,7 +161,7 @@ pub async fn subscribe_to_room(
         // TODO actual handling?
         match result {
             Ok(_) => {
-                console_log!("A websocket ended")
+                log!("A websocket ended")
             }
             Err(_) => {
                 server.nfsendj(&api::ServerToClientMessage::Info("Closed :(".to_string()));

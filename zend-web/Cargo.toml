@@ -20,6 +20,7 @@ pharos = "0.5.3"
 gloo-timers = { version = "0.2.6", features = ["futures"] }
 serde_json = "1.0.96"
 serde = "1.0.160"
+gloo-console = "0.2.3"
 
 
 [dependencies.web-sys]

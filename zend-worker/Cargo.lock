@@ -1451,9 +1451,12 @@ dependencies = [
  "futures",
  "getrandom",
  "hex",
+ "js-sys",
  "p256",
  "serde",
  "serde_json",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

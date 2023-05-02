@@ -1,17 +1,15 @@
 use std::{
     cell::{Cell, RefCell},
-    ops::Deref,
     rc::Rc,
     time::Duration,
 };
 
 use futures::{channel::mpsc, future, stream::StreamExt};
-use pharos::{Events, Observable, ObserveConfig};
 use std::future::Future;
-use wasm_bindgen::prelude::{wasm_bindgen, UnwrapThrowExt};
+use wasm_bindgen::prelude::UnwrapThrowExt;
 use web_sys::WebSocket;
-use ws_stream_wasm::{WsEvent, WsMessage, WsMeta, WsStream};
-use zend_common::api;
+use ws_stream_wasm::{WsMessage, WsMeta, WsStream};
+use zend_common::{api, log};
 
 macro_rules! let_is {
     ($p:pat = $i:ident) => {
@@ -21,12 +19,6 @@ macro_rules! let_is {
             false
         }
     };
-}
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
 }
 
 /*
@@ -63,13 +55,14 @@ where
 #[derive(Debug)]
 pub enum WrappedSocketEvent {
     Connected,
-    /// Seconds until next reconnection attempt
+    // Seconds until next reconnection attempt
     Reconnecting(u64),
     TextMessage(String),
     BinaryMessage(Vec<u8>),
     Ended(&'static str),
 }
 
+/*
 #[derive(Debug)]
 struct WebSocketWrap {
     finished: bool,
@@ -102,6 +95,7 @@ impl WebSocketWrap {
         let events = ws.observe(ObserveConfig::default()).await.unwrap_throw();
         Ok((wsio, events))
     }
+
     // TODO that is too much nesting. My eyes hurt. stop
     async fn next_event(&mut self) -> Option<WrappedSocketEvent> {
         if self.finished {
@@ -166,18 +160,105 @@ impl WebSocketWrap {
         })
     }
 }
+*/
+
+#[derive(Debug)]
+struct WebSocketWrap {
+    finished: bool,
+    url: String, // Could maybe be a &str but not really worth it I think
+    ws: Option<WsStream>,
+    retry_after: u64,
+    close_timeout: Duration,
+}
+impl WebSocketWrap {
+    fn new(url: &str, close_timeout: Option<Duration>) -> Self {
+        Self {
+            finished: false,
+            url: url.into(),
+            ws: None,
+            retry_after: 0,
+            close_timeout: close_timeout.unwrap_or(Duration::MAX),
+        }
+    }
+
+    async fn connect(&mut self) -> Result<WsStream, &'static str> {
+        let connect_future = Box::pin(WsMeta::connect(&self.url, None));
+        let timeout_future = gloo_timers::future::sleep(Duration::from_secs(5));
+        let select = future::select(connect_future, timeout_future).await;
+        let (_, wsio) = match select {
+            future::Either::Left((value, _)) => value.map_err(|_| "WsErr")?,
+            future::Either::Right(_) => return Err("Timeout"),
+        };
+        Ok(wsio)
+    }
+
+    async fn next_event(&mut self) -> Option<WrappedSocketEvent> {
+        if self.finished {
+            return None;
+        }
+        if let Some(wsio) = &mut self.ws {
+            let timeout_future = gloo_timers::future::sleep(self.close_timeout);
+            let next_result = match future::select(wsio.next(), timeout_future).await {
+                future::Either::Left((v, _)) => v,
+                future::Either::Right(_) => {
+                    if let Some(wsio) = self.ws.take() {
+                        wsio.wrapped().close().expect_throw(
+                            "Something went wrong when closing a websocket connection",
+                        );
+                    }
+                    return Some(WrappedSocketEvent::Reconnecting(self.retry_after));
+                }
+            };
+            if let Some(msg) = next_result {
+                return Some(match msg {
+                    WsMessage::Text(msg) => WrappedSocketEvent::TextMessage(msg),
+                    WsMessage::Binary(msg) => WrappedSocketEvent::BinaryMessage(msg),
+                });
+            };
+            self.ws.take();
+            return Some(WrappedSocketEvent::Reconnecting(self.retry_after));
+        }
+        if self.retry_after > 0 {
+            gloo_timers::future::sleep(Duration::from_secs(self.retry_after)).await;
+            // Exponential backoff maxing out at 60 seconds
+            self.retry_after = if self.retry_after * 2 > 60 {
+                60
+            } else {
+                self.retry_after * 2
+            };
+        } else {
+            self.retry_after = 5;
+        }
+        Some(match self.connect().await {
+            Ok(new) => {
+                self.retry_after = 0;
+                let _ = self.ws.insert(new);
+                WrappedSocketEvent::Connected
+            }
+            Err(_err) => WrappedSocketEvent::Reconnecting(self.retry_after),
+        })
+    }
+}
 
 #[derive(Debug)]
 pub struct WsRefCellWrap {
     ws_wrap: RefCell<WebSocketWrap>,
     ws_copy: RefCell<Option<WebSocket>>,
+    ended: Cell<bool>,
+    end_channel: (RefCell<mpsc::Sender<()>>, RefCell<mpsc::Receiver<()>>),
 }
 impl WsRefCellWrap {
     pub fn new(url: &str, close_timeout: Option<Duration>) -> Self {
+        let (sender, receiver) = mpsc::channel(0);
         Self {
-            ws_wrap: RefCell::new(WebSocketWrap::new(url, false, close_timeout)),
+            ws_wrap: RefCell::new(WebSocketWrap::new(url, close_timeout)),
             ws_copy: RefCell::new(None),
+            ended: Cell::new(false),
+            end_channel: (RefCell::new(sender), RefCell::new(receiver)),
         }
+    }
+    pub fn end(&self) {
+        let _ = self.end_channel.0.borrow_mut().try_send(());
     }
     pub fn send(&self, s: &str) {
         let ws = self.ws_copy.borrow();
@@ -186,21 +267,39 @@ impl WsRefCellWrap {
         }
     }
     pub async fn next_event(&self) -> Option<WrappedSocketEvent> {
+        if self.ended.get() {
+            return None;
+        }
         let mut wrap = self
             .ws_wrap
             .try_borrow_mut()
             .expect_throw("You ran next_event() twice at the same time. Don't do that :(");
-        let event = wrap.next_event().await?;
+
+        let mut recv = self.end_channel.1.borrow_mut();
+        let next_event_future = Box::pin(wrap.next_event());
+        let end_future = recv.next();
+        let event = match future::select(next_event_future, end_future).await {
+            future::Either::Left((ev, _)) => ev?,
+            future::Either::Right(_) => WrappedSocketEvent::Ended("End() called"),
+        };
         match event {
             WrappedSocketEvent::Connected => {
                 let mut ws = self.ws_copy.borrow_mut();
                 if let Some(new) = &wrap.ws {
-                    let _ = ws.insert(new.0.wrapped().clone());
+                    let _ = ws.insert(new.wrapped().clone());
                 }
             }
             WrappedSocketEvent::Reconnecting(_) => {
                 let mut ws = self.ws_copy.borrow_mut();
                 ws.take();
+            }
+            WrappedSocketEvent::Ended(_) => {
+                self.ended.set(true);
+                let ws = self.ws_copy.borrow_mut().take();
+                if let Some(ref ws) = ws {
+                    let _ = ws.close();
+                    wrap.finished = true;
+                }
             }
             _ => {}
         }
@@ -257,12 +356,12 @@ struct EventSubscription {
     event_filters: Vec<SubscriptionEventFilter>,
     sender: mpsc::Sender<ApiClientEvent>,
     subscriber_type: EventSubscriptionType,
-    id: u64,
+    id: usize,
 }
 
 pub struct EventSubscriptionHandle {
     pub receiver: mpsc::Receiver<ApiClientEvent>,
-    id: u64,
+    id: usize,
     api_client: WsApiClient,
 }
 impl EventSubscriptionHandle {
@@ -283,44 +382,60 @@ pub enum TimeoutOrEndedError {
 }
 
 #[derive(Debug)]
-pub struct WsApiClientFields {
+pub struct WsApiClientInner {
     ws: WsRefCellWrap,
     event_subscriptions: RefCell<Vec<EventSubscription>>,
-    next_event_subscription_id: Cell<u64>,
+    next_event_subscription_id: Cell<usize>,
     ws_state: Cell<WebSocketState>,
+    clones: Cell<usize>,
 }
 
-// TODO perform cleanup when last reference to WsApiClientFields is dropped (-> End background tasks)
-#[derive(Debug, Clone)]
-pub struct WsApiClient(Rc<WsApiClientFields>);
+#[derive(Debug)]
+pub struct WsApiClient {
+    inner: Rc<WsApiClientInner>,
+    anon: bool,
+}
+
 impl WsApiClient {
+    fn anon_clone(&self) -> Self {
+        Self {
+            inner: Rc::clone(&self.inner),
+            anon: true,
+        }
+    }
+
     pub fn new(url: &str) -> Self {
         let event_subscriptions = RefCell::new(Vec::<EventSubscription>::new());
         let ws = WsRefCellWrap::new(url, Some(Duration::from_secs(30)));
         let ws_state = Cell::new(WebSocketState::Reconnecting);
-        let next_event_subscription_id = Cell::new(0u64);
-        let data = WsApiClientFields {
+        let next_event_subscription_id = Cell::new(0usize);
+        let data = WsApiClientInner {
             ws,
             event_subscriptions,
             next_event_subscription_id,
             ws_state,
+            clones: Cell::new(1),
         };
-        let client = Self(Rc::new(data));
-        let client_clone = client.clone();
-
+        let new_client = Self {
+            inner: Rc::new(data),
+            anon: false,
+        };
+        // These clones are "anonymous" because they don't count towards the "clones" counter
+        // in inner.
+        let client = new_client.anon_clone();
         wasm_bindgen_futures::spawn_local(async move {
-            while let Some(event) = client.ws.next_event().await {
+            while let Some(event) = client.inner.ws.next_event().await {
                 handle_event(event, &client);
             }
             client
-                .0
+                .inner
                 .event_subscriptions
                 .borrow_mut()
                 .iter_mut()
-                .for_each(|v| v.sender.close_channel())
+                .for_each(|v| v.sender.close_channel());
+            log!("event handler task ended");
         });
-        let client = client_clone;
-        let client_clone = client.clone();
+        let client = new_client.anon_clone();
         wasm_bindgen_futures::spawn_local(async move {
             loop {
                 match client.await_state(WebSocketState::Connected).await {
@@ -340,8 +455,13 @@ impl WsApiClient {
                     },
                 };
             }
+            log!("pinger task ended");
         });
-        client_clone
+        new_client
+    }
+
+    pub fn end(&self) {
+        self.inner.ws.end();
     }
 
     pub fn send_message(&self, message: &api::ClientToServerMessage) -> Result<(), ()> {
@@ -349,7 +469,7 @@ impl WsApiClient {
             Ok(v) => v,
             Err(_) => return Err(()),
         };
-        self.ws.send(&message);
+        self.inner.ws.send(&message);
         return Ok(());
     }
 
@@ -357,11 +477,12 @@ impl WsApiClient {
         &self,
         subscriber_type: EventSubscriptionType,
         event_filters: Vec<SubscriptionEventFilter>,
-    ) -> (u64, mpsc::Receiver<ApiClientEvent>) {
+    ) -> (usize, mpsc::Receiver<ApiClientEvent>) {
         let (sender, receiver) = mpsc::channel::<ApiClientEvent>(256);
-        let id_cell = &self.next_event_subscription_id;
+        let id_cell = &self.inner.next_event_subscription_id;
         let id = id_cell.get();
-        self.event_subscriptions
+        self.inner
+            .event_subscriptions
             .borrow_mut()
             .push(EventSubscription {
                 event_filters,
@@ -373,8 +494,8 @@ impl WsApiClient {
         (id, receiver)
     }
 
-    pub fn unregister_event_subscription(&self, id: u64) {
-        let mut subscriptions = self.event_subscriptions.borrow_mut();
+    pub fn unregister_event_subscription(&self, id: usize) {
+        let mut subscriptions = self.inner.event_subscriptions.borrow_mut();
         let index = match subscriptions.iter().position(|v| v.id == id) {
             Some(v) => v,
             _ => return,
@@ -385,7 +506,7 @@ impl WsApiClient {
     pub fn one_event_future<T: Into<Vec<SubscriptionEventFilter>>>(
         &self,
         filters: T,
-    ) -> (u64, impl Future<Output = Result<ApiClientEvent, ()>>) {
+    ) -> (usize, impl Future<Output = Result<ApiClientEvent, ()>>) {
         let (id, mut receiver) =
             self.register_event_subscription(EventSubscriptionType::Once, filters.into());
         let fut = async move { receiver.next().await.ok_or(()) };
@@ -419,7 +540,7 @@ impl WsApiClient {
         &self,
         states: Vec<WebSocketState>,
     ) -> Option<Vec<SubscriptionEventFilter>> {
-        let current_state = self.ws_state.get();
+        let current_state = self.inner.ws_state.get();
         if states.iter().any(|v| *v == current_state) {
             return None;
         }
@@ -466,29 +587,46 @@ impl WsApiClient {
         EventSubscriptionHandle {
             receiver,
             id,
-            api_client: self.clone(),
+            api_client: self.anon_clone(),
         }
     }
 }
-impl Deref for WsApiClient {
-    type Target = Rc<WsApiClientFields>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Clone for WsApiClient {
+    fn clone(&self) -> Self {
+        let clones = self.inner.clones.get();
+        self.inner.clones.set(clones + 1);
+        Self {
+            inner: Rc::clone(&self.inner),
+            anon: false,
+        }
+    }
+}
+impl Drop for WsApiClient {
+    fn drop(&mut self) {
+        if self.anon {
+            return;
+        }
+        let clones = self.inner.clones.get();
+        if clones <= 1 {
+            log!("hi its me the wsapiclient drop glue");
+            self.end();
+        }
+        self.inner.clones.set(clones - 1);
     }
 }
 
 fn handle_event(event: WrappedSocketEvent, client: &WsApiClient) {
     let event = match event {
         WrappedSocketEvent::Connected => {
-            client.ws_state.set(WebSocketState::Connected);
+            client.inner.ws_state.set(WebSocketState::Connected);
             ApiClientEvent::Connected
         }
         WrappedSocketEvent::Reconnecting(v) => {
-            client.ws_state.set(WebSocketState::Reconnecting);
+            client.inner.ws_state.set(WebSocketState::Reconnecting);
             ApiClientEvent::Reconnecting(v)
         }
         WrappedSocketEvent::Ended(_) => {
-            client.ws_state.set(WebSocketState::Ended);
+            client.inner.ws_state.set(WebSocketState::Ended);
             ApiClientEvent::Ended
         }
 
@@ -501,7 +639,7 @@ fn handle_event(event: WrappedSocketEvent, client: &WsApiClient) {
         WrappedSocketEvent::BinaryMessage(_) => return,
     };
     // Ref only held until end of loop iteration, before which no .await occurs
-    let mut subscribers = client.event_subscriptions.borrow_mut();
+    let mut subscribers = client.inner.event_subscriptions.borrow_mut();
     let mut i = 0;
     loop {
         if i >= subscribers.len() {
