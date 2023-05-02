@@ -18,7 +18,7 @@ pub enum ApiClientEvent {
     Ended,
 }
 
-#[allow(unused)]
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 enum SubscriptionEventFilterItem {
     Any,
@@ -42,12 +42,12 @@ pub struct SubscriptionEventFilter {
 // Overkill but I felt like writing a funny little macro 👍
 macro_rules! add_filter_fn {
     ($i:ident, $j:ident $(($e:expr))? $(,$k:ident: $t:ty)*) => {
-        pub fn $i(mut self, $($k: $t,)*) -> Self {
+        pub fn $i(self, $($k: $t,)*) -> Self {
             self.add_filter_item(SubscriptionEventFilterItem::$j$(($e))?)
         }
     };
 }
-#[allow(unused)]
+#[allow(dead_code)]
 impl SubscriptionEventFilter {
     fn add_filter_item(mut self, item: SubscriptionEventFilterItem) -> Self {
         if self
@@ -142,7 +142,7 @@ pub struct WsApiClient {
 }
 
 // Public Api
-#[allow(unused)]
+#[allow(dead_code)]
 impl WsApiClient {
     pub fn new(url: &str) -> Self {
         let event_subscriptions = RefCell::new(Vec::<EventSubscription>::new());
