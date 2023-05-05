@@ -31,6 +31,9 @@ macro_rules! debug_log {
 
 #[macro_export]
 macro_rules! log {
+    () => {
+        $crate::log!("")
+    };
     ($($arg:tt)*) => {{
         let arr = $crate::_use::js_sys::Array::new_with_length(3);
         arr.set(

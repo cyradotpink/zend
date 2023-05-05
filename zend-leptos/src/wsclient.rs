@@ -14,7 +14,7 @@ use zend_common::{api, log};
 pub enum ApiClientEvent {
     Connected,
     Reconnecting(u64),
-    ApiMessage(zend_common::api::ServerToClientMessage),
+    ApiMessage(api::ServerToClientMessage),
     Ended,
 }
 
@@ -104,6 +104,7 @@ pub struct AwaitEventHandle {
 }
 impl AwaitEventHandle {
     pub async fn await_event(mut self) -> Result<ApiClientEvent, AwaitEventError> {
+        // zend_common::debug_log_pretty!(self);
         let timeout = match self.timeout {
             Some(v) => v,
             None => {
@@ -172,7 +173,9 @@ impl WsApiClient {
                 .event_subscriptions
                 .borrow_mut()
                 .iter_mut()
-                .for_each(|v| v.sender.close_channel());
+                .for_each(|v| {
+                    v.sender.close_channel();
+                });
             log!("event handler task ended");
         });
         let client = new_client.anon_clone();
@@ -180,9 +183,12 @@ impl WsApiClient {
             loop {
                 match client.await_state(WebSocketState::Connected).await {
                     Err(_) => break, // Ws ended and will never connect again
-                    _ => {}          // Ws was already connected or became connected after some time
+                    _ => {
+                        zend_common::log!()
+                    } // Ws was already connected or became connected after some time
                 }
                 let _ = client.send_message(&api::ClientToServerMessage::Ping);
+                zend_common::log!();
 
                 match client
                     .await_state_with_timeout(WebSocketState::Reconnecting, Duration::from_secs(10))
@@ -264,9 +270,13 @@ impl WsApiClient {
         subscriber_type: EventSubscriptionType,
         event_filters: Vec<SubscriptionEventFilterItem>,
     ) -> (usize, mpsc::Receiver<ApiClientEvent>) {
-        let (sender, receiver) = mpsc::channel::<ApiClientEvent>(256);
+        let (mut sender, receiver) = mpsc::channel::<ApiClientEvent>(256);
         let id_cell = &self.inner.next_event_subscription_id;
         let id = id_cell.get();
+        if self.inner.clones.get() < 1 {
+            sender.close_channel();
+            return (id, receiver);
+        }
         self.inner
             .event_subscriptions
             .borrow_mut()
