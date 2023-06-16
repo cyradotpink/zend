@@ -14,7 +14,7 @@ pub struct Nonce {
     pub timestamp: u64,
 }
 impl TryFrom<String> for Nonce {
-    type Error = String;
+    type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {
         let mut segments = value.split('_');
         let id = u64::from_str_radix(segments.next().ok_or("No ID segment.")?, 10)
@@ -22,7 +22,7 @@ impl TryFrom<String> for Nonce {
         let timestamp = u64::from_str_radix(segments.next().ok_or("No timestamp segment.")?, 10)
             .map_err(|_| "Invalid timestamp segment.")?;
         if segments.next().is_some() {
-            return Err("Too many segments".to_string());
+            return Err("Too many segments");
         }
         Ok(Self { id, timestamp })
     }
@@ -40,7 +40,7 @@ impl Into<String> for Nonce {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct EcdsaPublicKeyWrapper(ecdsa::VerifyingKey);
+pub struct EcdsaPublicKeyWrapper(pub ecdsa::VerifyingKey);
 impl TryFrom<String> for EcdsaPublicKeyWrapper {
     type Error = VerifyingKeyFromBase64Error;
     fn try_from(value: String) -> Result<Self, Self::Error> {
@@ -73,7 +73,7 @@ impl Display for VerifyingKeyFromBase64Error {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct EcdsaSignatureWrapper(Signature);
+pub struct EcdsaSignatureWrapper(pub Signature);
 
 #[derive(Debug, EnumConvert)]
 #[enum_convert(from)]
@@ -106,34 +106,39 @@ impl Display for EcdsaSignatureWrapper {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct RoomId(pub u64);
+pub struct RoomId(u64);
 impl RoomId {
+    pub fn from_int(id_int: u64) -> Self {
+        assert!(id_int < 26u64.pow(6), "Kira you dumb whore");
+        Self(id_int)
+    }
+    pub fn get_int(self) -> u64 {
+        self.0
+    }
     pub fn from_random(random: f64) -> Self {
-        if random >= 1.0 {
-            panic!()
-        }
+        assert!(random < 1.0, "Kira you dumb whore");
         Self((random * 26u64.pow(6) as f64) as u64)
     }
 }
 impl TryFrom<String> for RoomId {
-    type Error = String;
+    type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {
         let mut out_int = 0;
         let mut exponent = 5i8;
         for mut char in value.chars() {
             if exponent < 0 {
-                return Err("ID too long".into());
+                return Err("ID too long");
             }
             char.make_ascii_uppercase();
             if !char.is_ascii_uppercase() {
-                return Err("ID contains invalid characters".into());
+                return Err("ID contains invalid characters");
             }
             let value = (char as u64) - 65;
             out_int = out_int + 26u64.pow(exponent as u32) * value;
             exponent = exponent - 1;
         }
         if exponent > -1 {
-            return Err("ID too short".into());
+            return Err("ID too short");
         }
         Ok(Self(out_int))
     }
@@ -293,6 +298,7 @@ pub struct SignedMethodCall {
 impl SignedMethodCall {
     pub fn validate_timestamp(&self, now: u64) -> bool {
         let timestamp = self.signed_call.call.common_arguments.nonce.timestamp;
+        // Accept timestamps from up to 10 seconds in the future and 5 minutes in the past
         timestamp < now + 10 && timestamp > now - 5 * 60
     }
     pub fn validate_signature(&self) -> Result<(), p256::ecdsa::Error> {

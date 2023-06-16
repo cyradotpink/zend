@@ -1,11 +1,10 @@
+use crate::util::*;
+use futures::{channel::mpsc, future, stream::StreamExt};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
     time::Duration,
 };
-
-use futures::{channel::mpsc, future, stream::StreamExt};
-use std::future::Future;
 use web_sys::WebSocket;
 use ws_stream_wasm::{WsMessage, WsMeta, WsStream};
 use zend_common::{api, log};
@@ -304,7 +303,6 @@ impl WsApiClient {
         if states.iter().any(|v| *v == current_state) {
             return None;
         }
-        drop(current_state);
         Some(SubscriptionEventFilter {
             inner: states
                 .into_iter()
@@ -540,7 +538,7 @@ enum WrappedSocketEvent {
 #[derive(Debug)]
 struct WebSocketWrap {
     finished: bool,
-    url: String, // Could maybe be a &str but not really worth it I think
+    url: String,
     ws: Option<WsStream>,
     retry_after: u64,
     close_timeout: Duration,
@@ -680,16 +678,5 @@ impl WsRefCellWrap {
             _ => {}
         }
         Some(event)
-    }
-}
-
-async fn future_or_timeout<A>(future: A, timeout: Duration) -> Option<A::Output>
-where
-    A: Future + Unpin,
-{
-    let timeout_fut = gloo_timers::future::sleep(timeout);
-    match futures::future::select(future, timeout_fut).await {
-        futures::future::Either::Left((v, _)) => Some(v),
-        futures::future::Either::Right(_) => None,
     }
 }

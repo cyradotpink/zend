@@ -1,5 +1,7 @@
 use leptos::*;
 use leptos_router::*;
+mod appclient;
+mod util;
 mod wsclient;
 
 #[component]

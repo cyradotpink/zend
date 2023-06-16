@@ -10,9 +10,12 @@ futures = "0.3.28"
 gloo-timers = { version = "0.2.6", features = ["futures"] }
 leptos = "0.2.5"
 leptos_router = { version = "0.2.5", features = ["csr"] }
+p256 = { version = "0.13.2", features = ["ecdsa", "sha256", "ecdh"] }
+aes-gcm = "0.10.2"
 serde = "1.0.162"
 serde_json = "1.0.96"
 wasm-bindgen-futures = "0.4.34"
 web-sys = "0.3.61"
 ws_stream_wasm = "0.7.4"
 zend-common = { version = "0.1.0", path = "../common/zend-common" }
+sha2 = "0.10.7"

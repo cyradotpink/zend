@@ -14,6 +14,23 @@ pub fn encode_base64(value: &[u8]) -> String {
 pub fn decode_base64(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
 }
+pub fn decode_base64_slice(
+    value: &str,
+    output: &mut [u8],
+) -> Result<usize, base64::DecodeSliceError> {
+    base64::Engine::decode_slice(&base64::engine::general_purpose::STANDARD, value, output)
+}
+pub fn decode_base64_slice_exact(
+    value: &str,
+    length: usize,
+    output: &mut [u8],
+) -> Result<(), &'static str> {
+    decode_base64_slice(value, output)
+        .map_err(|_| "Base64 decode error")?
+        .eq(&length)
+        .then_some(())
+        .ok_or("Bad IV length")
+}
 
 #[macro_export]
 macro_rules! debug_log_pretty {
