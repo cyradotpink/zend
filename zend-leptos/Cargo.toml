@@ -19,3 +19,5 @@ web-sys = "0.3.61"
 ws_stream_wasm = "0.7.4"
 zend-common = { version = "0.1.0", path = "../common/zend-common" }
 sha2 = "0.10.7"
+js-sys = "0.3.64"
+rand_core = { version = "0.6.4", features = ["getrandom"] }

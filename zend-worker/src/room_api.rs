@@ -43,6 +43,7 @@ pub struct UnicastDataMessage {
     pub receiver_id: api::EcdsaPublicKeyWrapper,
     pub nonce: api::Nonce,
     pub write_history: bool,
+    pub make_receiver_privileged: bool,
 }
 
 #[derive(Serialize)]

@@ -1,5 +1,16 @@
+#![allow(dead_code)]
+
 use crate::wsclient::WsApiClient;
-use zend_common::{api, util};
+use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit};
+use std::{
+    fmt::Debug,
+    time::{Duration, SystemTime},
+};
+use zend_common::{
+    _use::wasm_bindgen::UnwrapThrowExt,
+    api::{self, EcdsaSignatureWrapper},
+    util,
+};
 
 use p256::{
     ecdh,
@@ -88,10 +99,7 @@ struct EncodedDataCipherRoom {
     aes_iv: Aes256GcmIv,
 }
 impl EncodedDataCipherRoom {
-    fn decode(&self, key: Aes256GcmKey) -> Result<String, &'static str> {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::KeyInit;
-
+    fn decrypt(&self, key: &Aes256GcmKey) -> Result<String, &'static str> {
         let cipher = aes_gcm::Aes256Gcm::new(&key.0);
         String::from_utf8(
             cipher
@@ -105,6 +113,16 @@ impl EncodedDataCipherRoom {
         )
         .map_err(|_| "Failed to utf8-decode room-encrypted ciphertext's plaintext")
     }
+    fn encrypt(key: &aes_gcm::Key<aes_gcm::Aes256Gcm>, iv: [u8; 12], plaintext: String) -> Self {
+        let cipher = Aes256Gcm::new(key);
+        let cipher_text = cipher
+            .encrypt(&iv.into(), plaintext.as_bytes())
+            .unwrap_throw();
+        Self {
+            aes_text: util::encode_base64(&cipher_text),
+            aes_iv: Aes256GcmIv(iv),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -115,13 +133,10 @@ struct EncodedDataCipherPeer {
     aes_text: String,
 }
 impl EncodedDataCipherPeer {
-    fn decode(&self, key: ecdh::EphemeralSecret) -> Result<String, &'static str> {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::KeyInit;
-
+    fn decrypt(&self, key: &ecdh::EphemeralSecret) -> Result<String, &'static str> {
         let shared = key.diffie_hellman(&self.ecdh_public_key.0);
         let hkdf = shared.extract::<sha2::Sha256>(Some(&self.hkdf_salt.0));
-        let mut okm: [u8; 32] = [0; 32];
+        let mut okm = [0u8; 32];
         hkdf.expand(&[], &mut okm)
             .map_err(|_| "Failed to use ECDH shared secret as AES key material")?;
         let hkdf_derived_key: &aes_gcm::Key<aes_gcm::Aes256Gcm> = okm.as_slice().into();
@@ -142,12 +157,7 @@ impl EncodedDataCipherPeer {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct EncodedDataTextPlain {
-    plain_text: String,
-}
-impl EncodedDataTextPlain {
-    fn decode(self) -> String {
-        self.plain_text
-    }
+    pub plain_text: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -158,6 +168,32 @@ enum CipherInfo {
     Plain(EncodedDataTextPlain),
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct CipherPart {
+    cipher_info: String,
+    signature: api::EcdsaSignatureWrapper,
+}
+impl CipherPart {
+    fn with_room_key(
+        room_key: &aes_gcm::Key<aes_gcm::Aes256Gcm>,
+        signing_key: &ecdsa::SigningKey,
+        iv: [u8; 12],
+        call: &RoomMethodCall,
+    ) -> Self {
+        use p256::ecdsa::signature::Signer;
+
+        let call_json = serde_json::to_string(call).unwrap_throw();
+        let encoded = EncodedDataCipherRoom::encrypt(room_key, iv, call_json);
+        let cipher_info = CipherInfo::Room(encoded);
+        let cipher_info_json = serde_json::to_string(&cipher_info).unwrap_throw();
+
+        Self {
+            signature: EcdsaSignatureWrapper(signing_key.sign(cipher_info_json.as_bytes())),
+            cipher_info: cipher_info_json,
+        }
+    }
+}
+
 struct EncodedData {
     room_id: api::RoomId,
     sender_id: api::EcdsaPublicKeyWrapper,
@@ -166,11 +202,6 @@ struct EncodedData {
 }
 impl EncodedData {
     fn from_message(data: api::SubscriptionData) -> Result<Self, &'static str> {
-        #[derive(Debug, Deserialize)]
-        struct CipherPart {
-            cipher_info: String,
-            signature: api::EcdsaSignatureWrapper,
-        }
         let cipher_part: CipherPart =
             serde_json::from_value(data.data).map_err(|_| "Error parsing CipherPart")?;
         let cipher_info: CipherInfo = serde_json::from_str(&cipher_part.cipher_info)
@@ -195,38 +226,173 @@ impl EncodedData {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum RoomMethodCall {
+    AcceptJoin {
+        room_key: Aes256GcmKey,
+    },
+    InitJoin {
+        joining_id: EcdhPublicKey,
+    },
+    SendMessage {
+        message: String,
+    },
+    DeleteMessage {
+        target_nonce: api::Nonce,
+        sender_id: api::EcdsaPublicKeyWrapper,
+    },
+    ConfirmJoin {
+        joined_id: api::EcdsaPublicKeyWrapper,
+    },
+    PreventJoin {
+        denied_id: api::EcdsaPublicKeyWrapper,
+    },
+}
+
 struct DecodedData {
-    plain_data: (),
+    method_call: RoomMethodCall,
     room_id: api::RoomId,
     sender_id: api::EcdsaPublicKeyWrapper,
     nonce: api::Nonce,
 }
+impl DecodedData {
+    fn from_encoded_data(
+        data: EncodedData,
+        aes_key: &Aes256GcmKey,
+        ecdh_secret: &ecdh::EphemeralSecret,
+    ) -> Result<Self, &'static str> {
+        let info_json = match data.cipher_info {
+            CipherInfo::Room(info) => info.decrypt(aes_key)?,
+            CipherInfo::Peer(info) => info.decrypt(ecdh_secret)?,
+            CipherInfo::Plain(info) => info.plain_text,
+        };
+        let call: RoomMethodCall = serde_json::from_str(&info_json)
+            .map_err(|_| "Failed to deserialise method call JSON")?;
+        Ok(Self {
+            method_call: call,
+            room_id: data.room_id,
+            sender_id: data.sender_id,
+            nonce: data.nonce,
+        })
+    }
+}
 
 struct JoinedRoomInfo {
     room_key: aes_gcm::Key<aes_gcm::Aes256Gcm>,
-}
-
-pub struct RoomTextMessage {
-    pub text: String,
-    nonce: api::Nonce,
-    pub sender_id: api::EcdsaPublicKeyWrapper,
-}
-
-pub struct CurrentRoomInfo {
     room_id: api::RoomId,
+}
+
+#[derive(Debug)]
+pub struct RoomTextMessage {
+    text: String,
+    nonce: api::Nonce,
+    sender_id: api::EcdsaPublicKeyWrapper,
+}
+
+// Valid state transitions are:
+// NoRoom -> CreatingRoom
+// NoRoom -> JoiningRoom
+// CreatingRoom -> InRoom
+// Joiningroom -> Inroom
+// InRoom -> NoRoom (By AppState reinit)
+#[derive(Debug)]
+pub enum CurrentAppState {
+    NoRoom,
+    CreatingRoom,
+    JoiningRoom {
+        room_id: api::RoomId,
+    },
+    InRoom {
+        room_id: api::RoomId,
+        room_key: aes_gcm::Key<aes_gcm::Aes256Gcm>,
+    },
+}
+
+pub struct RoomState {
+    current_state: CurrentAppState,
     ecdh_secret: ecdh::EphemeralSecret,
     ecdh_public_key: p256::PublicKey,
-    pub ecdsa_verifying_key: ecdsa::VerifyingKey,
+    ecdsa_verifying_key: ecdsa::VerifyingKey,
     ecdsa_signing_key: ecdsa::SigningKey,
-    joined_room_info: Option<JoinedRoomInfo>,
-    pub messages: Vec<RoomTextMessage>,
+    messages: Vec<RoomTextMessage>,
+    next_nonce: api::Nonce,
+    last_time: u64,
+}
+impl Debug for RoomState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("current_state", &self.current_state)
+            .field("messages", &self.messages)
+            .field("next_nonce", &self.next_nonce)
+            .field("last_time", &self.last_time)
+            .finish()
+    }
+}
+fn get_sys_time() -> u64 {
+    (js_sys::Date::now() / 1000f64) as u64
+}
+impl RoomState {
+    pub fn init() -> Self {
+        let ecdh_secret = ecdh::EphemeralSecret::random(&mut rand_core::OsRng);
+        let ecdh_public_key = ecdh_secret.public_key();
+        let ecdsa_signing_key = ecdsa::SigningKey::random(&mut rand_core::OsRng);
+        let ecdsa_verifying_key = ecdsa::VerifyingKey::from(&ecdsa_signing_key);
+        let time = get_sys_time();
+        Self {
+            current_state: CurrentAppState::NoRoom,
+            ecdh_secret,
+            ecdh_public_key,
+            ecdsa_verifying_key,
+            ecdsa_signing_key,
+            messages: Vec::new(),
+            next_nonce: api::Nonce::new(time),
+            last_time: time,
+        }
+    }
+    fn reinit(&mut self) {
+        *self = Self::init();
+    }
+    fn get_time(&mut self) -> u64 {
+        let now = std::cmp::max(self.last_time, get_sys_time());
+        self.last_time = now;
+        now
+    }
+    fn next_nonce(&mut self) -> api::Nonce {
+        let time = self.get_time();
+        let nonce = self.next_nonce;
+        self.next_nonce.increment(time);
+        nonce
+    }
 }
 
-pub struct AppState {
-    pub current_room: Option<CurrentRoomInfo>,
-}
-
+#[derive(Debug)]
 pub struct AppClient {
     api_client: WsApiClient,
-    app_state: AppState,
+    room_state: RoomState,
+    next_call_id: u64,
+}
+impl AppClient {
+    pub fn new() -> Self {
+        Self {
+            api_client: WsApiClient::new("https://garbage.notaws"),
+            room_state: RoomState::init(),
+            next_call_id: 0,
+        }
+    }
+    pub fn make_server_method_call<T: Into<api::MethodCallArgsVariants>>(
+        &mut self,
+        args: T,
+    ) -> api::ClientToServerMessage {
+        // let args: api::MethodCallArgsVariants = args.into();
+        let call = api::MethodCallContent::new(
+            api::EcdsaPublicKeyWrapper(self.room_state.ecdsa_verifying_key),
+            self.room_state.next_nonce(),
+            args.into(),
+        );
+        let call = call
+            .sign(self.next_call_id, &self.room_state.ecdsa_signing_key)
+            .unwrap_throw();
+        self.next_call_id += 1;
+        call.into()
+    }
 }

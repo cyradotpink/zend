@@ -49,6 +49,7 @@ type UnicastDataMessage = {
   nonce: string
   receiver_id: string
   write_history: boolean
+  make_receiver_privileged: boolean
 }
 
 type DeleteDataMessage = {
@@ -119,6 +120,16 @@ export class Room {
     this.state.storage.setAlarm(Date.now() + 20 * 60 * 1000)
   }
 
+  async addPrivilegedPeer(adder_id: string, added_id: string) {
+    let peers = await this.getPrivilegedPeers()
+    if (!peers.includes(adder_id)) return false
+    if (!peers.includes(added_id)) {
+      peers.push(added_id)
+      this.state.storage.put('privileged_peers', peers)
+    }
+    return true
+  }
+
   async handleFetch(body: ToRoomMessage): Promise<null | boolean | [number, WebSocket | null]> {
     switch (body.message_type) {
       case 'check_exists': {
@@ -168,13 +179,7 @@ export class Room {
       }
       case 'add_privileged_peer': {
         body = body as AddPrivilegedPeerMessage
-        let peers = await this.getPrivilegedPeers()
-        if (!peers.includes(body.adder_id)) return false
-        if (!peers.includes(body.added_id)) {
-          peers.push(body.added_id)
-          this.state.storage.put('privileged_peers', peers)
-        }
-        return true
+        return this.addPrivilegedPeer(body.adder_id, body.added_id)
       }
       case 'delete': {
         body = body as DeleteMessage
@@ -219,6 +224,9 @@ export class Room {
       case 'unicast_data': {
         if (!(await this.exists())) return false
         body = body as UnicastDataMessage
+        if (body.make_receiver_privileged) {
+          this.addPrivilegedPeer(body.sender_id, body.receiver_id)
+        }
         if (body.write_history) {
           let history =
             ((await this.state.storage.get('message_history')) as HistoryEntry[] | undefined) || []

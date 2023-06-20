@@ -80,11 +80,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
         if let Mode::Do = into_override {
             output.extend(quote! {
                 impl #impl_generics TryInto<#type_path> for #enum_ident #ty_generics #where_clause {
-                    type Error = String;
+                    type Error = &'static str;
                     fn try_into(self) -> Result<#type_path, Self::Error> {
                         match self {
                             Self::#variant_ident(value) => Ok(value),
-                            _ => Err("Incorrect Variant".to_string()),
+                            _ => Err("Incorrect Variant"),
                         }
                     }
                 }

@@ -65,7 +65,7 @@ async fn check_signed_method_call(
                 .signed_call
                 .call
                 .common_arguments
-                .ecdsa_public_key
+                .caller_id
                 .to_string(),
         )?
         .get_stub()?;

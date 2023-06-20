@@ -2,16 +2,56 @@ use crate::util;
 use enum_convert::EnumConvert;
 use p256::{
     ecdsa,
-    ecdsa::{signature::Verifier, Signature},
+    ecdsa::{
+        signature::{Signer, Verifier},
+        Signature,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use wasm_bindgen::UnwrapThrowExt;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "String", into = "String")]
 pub struct Nonce {
     pub id: u64,
     pub timestamp: u64,
+}
+impl Nonce {
+    pub fn new(time: u64) -> Self {
+        Self {
+            id: 0,
+            timestamp: time,
+        }
+    }
+    pub fn next(self, time: u64) -> Self {
+        Self {
+            id: if time > self.timestamp {
+                0
+            } else {
+                self.id + 1
+            },
+            timestamp: time,
+        }
+    }
+    pub fn increment(&mut self, time: u64) -> Self {
+        *self = self.next(time);
+        *self
+    }
+}
+impl Ord for Nonce {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let ts_cmp = self.timestamp.cmp(&other.timestamp);
+        match ts_cmp {
+            std::cmp::Ordering::Equal => self.id.cmp(&other.id),
+            _ => ts_cmp,
+        }
+    }
+}
+impl PartialOrd for Nonce {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 impl TryFrom<String> for Nonce {
     type Error = &'static str;
@@ -169,67 +209,69 @@ impl Display for RoomId {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MethodCallCommonArgs {
-    pub ecdsa_public_key: EcdsaPublicKeyWrapper,
+    pub caller_id: EcdsaPublicKeyWrapper,
     pub nonce: Nonce,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeToRoomArgs {
     pub room_id: RoomId,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnsubscribeFromRoomArgs {
     pub subscription_id: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddPrivilegedPeerArgs {
     pub room_id: RoomId,
-    pub allow_ecdsa_public_key: EcdsaPublicKeyWrapper,
+    pub allow_id: EcdsaPublicKeyWrapper,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetRoomDataHistoryArgs {
     pub room_id: RoomId,
     pub from_timestamp: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteDataArgs {
     pub room_id: RoomId,
-    pub data_sender_key: EcdsaPublicKeyWrapper,
+    pub data_sender_id: EcdsaPublicKeyWrapper,
     pub data_nonce: Nonce,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendDataCommonArgs {
     pub room_id: RoomId,
     pub write_history: bool,
-    pub timestamp: u64,
+    // pub timestamp: u64,
     // #[serde(flatten)]
     // data: SendDataDataVariants,
     pub data: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BroadcastDataArgs {
     #[serde(flatten)]
     pub common_args: SendDataCommonArgs,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnicastDataArgs {
-    pub receiver_ecdsa_public_key: EcdsaPublicKeyWrapper,
+    pub receiver_id: EcdsaPublicKeyWrapper,
     #[serde(flatten)]
     pub common_args: SendDataCommonArgs,
+    pub make_receiver_privileged: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, EnumConvert)]
 #[serde(tag = "method_name", content = "method_arguments")]
 #[serde(rename_all = "snake_case")]
+#[enum_convert(from)]
 pub enum MethodCallArgsVariants {
     CreateRoom,
     SubscribeToRoom(SubscribeToRoomArgs),
@@ -241,12 +283,39 @@ pub enum MethodCallArgsVariants {
     UnicastData(UnicastDataArgs),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(try_from = "serde_json::Value")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// #[serde(try_from = "serde_json::Value")] // TODO check if this was actually unnecessary?
 pub struct MethodCallContent {
+    #[serde(flatten)]
     pub common_arguments: MethodCallCommonArgs,
+    #[serde(flatten)]
     pub variant_arguments: MethodCallArgsVariants,
 }
+impl MethodCallContent {
+    pub fn new<T: Into<MethodCallArgsVariants>>(
+        caller_id: EcdsaPublicKeyWrapper,
+        nonce: Nonce,
+        args: T,
+    ) -> Self {
+        Self {
+            common_arguments: MethodCallCommonArgs { caller_id, nonce },
+            variant_arguments: args.into(),
+        }
+    }
+    pub fn sign(
+        self,
+        call_id: u64,
+        signing_key: &ecdsa::SigningKey,
+    ) -> Result<SignedMethodCall, serde_json::Error> {
+        let signed_call: MethodCall = self.try_into()?;
+        Ok(SignedMethodCall {
+            call_id,
+            signature: EcdsaSignatureWrapper(signing_key.sign(signed_call.json.as_bytes())),
+            signed_call,
+        })
+    }
+}
+/*
 impl TryFrom<serde_json::Value> for MethodCallContent {
     type Error = serde_json::Error;
     fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
@@ -263,13 +332,22 @@ impl TryFrom<serde_json::Value> for MethodCallContent {
             variant_arguments,
         })
     }
-}
+} */
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct MethodCall {
     json: String,
     pub call: MethodCallContent,
+}
+impl TryFrom<MethodCallContent> for MethodCall {
+    type Error = serde_json::Error;
+    fn try_from(value: MethodCallContent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            json: serde_json::to_string(&value)?,
+            call: value,
+        })
+    }
 }
 impl TryFrom<String> for MethodCall {
     type Error = serde_json::Error;
@@ -281,6 +359,11 @@ impl TryFrom<String> for MethodCall {
         })
     }
 }
+impl Into<String> for MethodCall {
+    fn into(self) -> String {
+        self.json
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SignedMethodCallPartial {
@@ -289,7 +372,7 @@ pub struct SignedMethodCallPartial {
     extra: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedMethodCall {
     pub call_id: u64,
     pub signed_call: MethodCall,
@@ -305,19 +388,20 @@ impl SignedMethodCall {
         self.signed_call
             .call
             .common_arguments
-            .ecdsa_public_key
+            .caller_id
             .0
             .verify(self.signed_call.json.as_bytes(), &self.signature.0)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, EnumConvert)]
-#[serde(try_from = "SignedMethodCallPartial")]
-#[enum_convert(from, into)]
+#[derive(Debug, Clone, Serialize, Deserialize, EnumConvert)]
+#[serde(untagged)]
+#[enum_convert(from)]
 pub enum SignedMethodCallOrPartial {
-    Partial(u64),
     Full(SignedMethodCall),
+    Partial(u64),
 }
+/*
 impl From<SignedMethodCallPartial> for SignedMethodCallOrPartial {
     fn from(value: SignedMethodCallPartial) -> Self {
         fn fallible(mut value: SignedMethodCallPartial) -> Result<SignedMethodCall, ()> {
@@ -333,14 +417,19 @@ impl From<SignedMethodCallPartial> for SignedMethodCallOrPartial {
             Err(_) => Self::Partial(call_id),
         }
     }
-}
+}*/
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "message_type")]
 #[serde(content = "message_content")]
 pub enum ClientToServerMessage {
     Ping,
     SignedMethodCall(SignedMethodCallOrPartial),
+}
+impl From<SignedMethodCall> for ClientToServerMessage {
+    fn from(value: SignedMethodCall) -> Self {
+        Self::SignedMethodCall(SignedMethodCallOrPartial::Full(value))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,12 +470,12 @@ impl ErrorId {
         }
     }
     pub fn with_default_message(self) -> MethodCallError {
-        #[allow(unreachable_patterns)]
+        // #[allow(unreachable_patterns)]
         let message = match self {
             ErrorId::InternalError => "An unexpected internal error occured.",
             ErrorId::InvalidSignature => "The request was not signed correctly.",
             ErrorId::ParseError => "The request could not be parsed.",
-            _ => "",
+            // _ => "",
         };
         if message.is_empty() {
             MethodCallError {

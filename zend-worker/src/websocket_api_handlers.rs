@@ -53,7 +53,7 @@ pub async fn create_room(
         );
         let tmp_stub = namespace.id_from_name(&tmp_id.to_string())?.get_stub()?;
         let request = room_api::InitialiseMessage {
-            initial_peer_id: common_args.ecdsa_public_key.clone(),
+            initial_peer_id: common_args.caller_id.clone(),
         }
         .into_request()?;
         let mut response = tmp_stub.fetch_with_request(request).await?;
@@ -129,7 +129,7 @@ pub async fn subscribe_to_room(
 ) -> Result<api::MethodCallSuccess, Error> {
     let room_id = args.room_id;
     let request = room_api::SubscribeMessage {
-        subscriber_id: common_args.ecdsa_public_key.clone(),
+        subscriber_id: common_args.caller_id.clone(),
     }
     .into_request()?;
     let stub = get_room_stub(env.as_ref(), room_id)?;
@@ -183,8 +183,8 @@ pub async fn add_privileged_peer(
 ) -> Result<api::MethodCallSuccess, Error> {
     let room_id = args.room_id;
     let request = room_api::AddPrivilegedPeerMessage {
-        adder_id: common_args.ecdsa_public_key,
-        added_id: args.allow_ecdsa_public_key,
+        adder_id: common_args.caller_id,
+        added_id: args.allow_id,
     }
     .into_request()?;
     let stub = get_room_stub(env, room_id)?;
@@ -209,7 +209,7 @@ pub async fn broadcast_data(
     let args = args.common_args;
     let request = room_api::BroadcastDataMessage {
         data: args.data,
-        sender_id: common_args.ecdsa_public_key,
+        sender_id: common_args.caller_id,
         nonce: common_args.nonce,
         write_history: args.write_history,
     }
